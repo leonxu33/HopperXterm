@@ -1,0 +1,48 @@
+import { describe, it, expect } from 'vitest';
+import { hostKeyFor, getResourceBuffer, resetResourceBuffer } from './ResourcePanel';
+
+describe('hostKeyFor', () => {
+  it('returns null for nullish sessions', () => {
+    expect(hostKeyFor(null)).toBeNull();
+    expect(hostKeyFor(undefined)).toBeNull();
+  });
+
+  it('builds user@host:port for ssh sessions', () => {
+    expect(hostKeyFor({ type: 'ssh', user: 'user', host: '10.0.0.1', port: 2200 }))
+      .toBe('user@10.0.0.1:2200');
+  });
+
+  it('defaults the ssh port to 22 and user to empty', () => {
+    expect(hostKeyFor({ type: 'ssh', host: 'box' })).toBe('@box:22');
+  });
+
+  it('returns null for ssh without a host', () => {
+    expect(hostKeyFor({ type: 'ssh', user: 'x' })).toBeNull();
+  });
+
+  it('builds ec2:region:instance:user for awsec2 sessions', () => {
+    expect(hostKeyFor({ type: 'awsec2', instanceId: 'i-abc', region: 'us-east-1', user: 'ec2-user' }))
+      .toBe('ec2:us-east-1:i-abc:ec2-user');
+  });
+
+  it('returns null for awsec2 without an instance id', () => {
+    expect(hostKeyFor({ type: 'awsec2', region: 'us-east-1' })).toBeNull();
+  });
+
+  it('returns null for protocols that have no resource monitor', () => {
+    expect(hostKeyFor({ type: 'ftp', host: 'h' })).toBeNull();
+    expect(hostKeyFor({ type: 'aws' })).toBeNull();
+  });
+});
+
+describe('resource buffer accessors', () => {
+  it('getResourceBuffer returns an empty array for unknown / null keys', () => {
+    expect(getResourceBuffer(null)).toEqual([]);
+    expect(getResourceBuffer('never-seen')).toEqual([]);
+  });
+
+  it('resetResourceBuffer is a safe no-op on null / unknown keys', () => {
+    expect(() => resetResourceBuffer(null)).not.toThrow();
+    expect(() => resetResourceBuffer('never-seen')).not.toThrow();
+  });
+});

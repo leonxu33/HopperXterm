@@ -1,0 +1,205 @@
+// Package workspace persists named tab layouts (which sessions in
+// which 2D pane grid). Overwrite-by-name; restoring opens fresh tabs
+// from a saved snapshot. One JSON file holds the full collection.
+package workspace
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+
+	"hopperxterm/appdir"
+)
+
+const workspacesFile = "workspaces.json"
+
+// ErrNotFound is returned by mutators when the target name is unknown.
+var ErrNotFound = errors.New("workspace: not found")
+
+// Tab is one terminal tab with its pane layout. The layout is a recursive
+// split tree owned and validated entirely by the frontend; the backend
+// treats it opaquely (stored and returned verbatim as JSON), so changes to
+// the layout schema never require a backend change. Older workspaces store a
+// column-major array here — the frontend migrates it on load.
+type Tab struct {
+	Label  string      `json:"label"`
+	Layout interface{} `json:"layout"`
+}
+
+// Workspace is a named snapshot of tabs.
+type Workspace struct {
+	Name      string `json:"name"`
+	Tabs      []Tab  `json:"tabs"`
+	UpdatedAt int64  `json:"updatedAt"` // unix millis
+}
+
+// Store keeps the workspaces collection on disk under a directory.
+// Thread-safe.
+type Store struct {
+	mu         sync.RWMutex
+	dir        string
+	workspaces []Workspace
+}
+
+// OpenDefault opens the store under the shared app config dir (appdir.Base).
+func OpenDefault() (*Store, error) {
+	dir, err := appdir.Base()
+	if err != nil {
+		return nil, fmt.Errorf("workspace: config dir: %w", err)
+	}
+	return Open(dir)
+}
+
+// Open opens the store at an explicit directory. Used by tests.
+func Open(dir string) (*Store, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("workspace: mkdir %s: %w", dir, err)
+	}
+	s := &Store{dir: dir}
+	if err := s.load(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// NewInMemory returns a non-persistent store.
+func NewInMemory() *Store {
+	return &Store{dir: ""}
+}
+
+func (s *Store) load() error {
+	if s.dir == "" {
+		return nil
+	}
+	path := filepath.Join(s.dir, workspacesFile)
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("workspace: read %s: %w", path, err)
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	return json.Unmarshal(b, &s.workspaces)
+}
+
+// Reload discards in-memory state and re-reads it from disk. Used after
+// a config import replaces the underlying JSON file.
+func (s *Store) Reload() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workspaces = nil
+	return s.load()
+}
+
+// List returns workspaces sorted by name (case-insensitive).
+func (s *Store) List() []Workspace {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Workspace, len(s.workspaces))
+	copy(out, s.workspaces)
+	return out
+}
+
+// Save upserts a workspace by name. New entries are appended in
+// alphabetical order; existing entries keep their position but get
+// fresh content.
+func (s *Store) Save(w Workspace) error {
+	if w.Name == "" {
+		return errors.New("workspace: name required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.workspaces {
+		if s.workspaces[i].Name == w.Name {
+			s.workspaces[i] = w
+			return s.persist()
+		}
+	}
+	// Insert alphabetically (case-insensitive).
+	insertAt := len(s.workspaces)
+	for i, existing := range s.workspaces {
+		if lessFoldName(w.Name, existing.Name) {
+			insertAt = i
+			break
+		}
+	}
+	s.workspaces = append(s.workspaces, Workspace{})
+	copy(s.workspaces[insertAt+1:], s.workspaces[insertAt:])
+	s.workspaces[insertAt] = w
+	return s.persist()
+}
+
+// Delete removes a workspace by name. ErrNotFound if absent.
+func (s *Store) Delete(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.workspaces {
+		if s.workspaces[i].Name == name {
+			s.workspaces = append(s.workspaces[:i], s.workspaces[i+1:]...)
+			return s.persist()
+		}
+	}
+	return ErrNotFound
+}
+
+// Get returns a workspace by name, or ErrNotFound.
+func (s *Store) Get(name string) (Workspace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i := range s.workspaces {
+		if s.workspaces[i].Name == name {
+			return s.workspaces[i], nil
+		}
+	}
+	return Workspace{}, ErrNotFound
+}
+
+func (s *Store) persist() error {
+	if s.dir == "" {
+		return nil
+	}
+	path := filepath.Join(s.dir, workspacesFile)
+	b, err := json.MarshalIndent(s.workspaces, "", "  ")
+	if err != nil {
+		return fmt.Errorf("workspace: marshal: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return fmt.Errorf("workspace: write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("workspace: rename %s: %w", path, err)
+	}
+	return nil
+}
+
+// lessFoldName compares two names, lowercasing ASCII letters inline
+// (sufficient for typical workspace names; non-ASCII falls through to
+// byte order, which is acceptable for sorting display purposes).
+func lessFoldName(a, b string) bool {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		ai := lowerASCII(a[i])
+		bi := lowerASCII(b[i])
+		if ai != bi {
+			return ai < bi
+		}
+	}
+	return len(a) < len(b)
+}
+
+func lowerASCII(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + 32
+	}
+	return c
+}

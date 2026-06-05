@@ -1,0 +1,869 @@
+// ResourcePanel — CPU / Memory / Disk I/O / Network charts driven by
+// resource:sample:{paneId} events. Mirrors HopperResourceMonitor in
+// hopperterm-resources.jsx: glass card with bordered svg frame, dashed
+// 25/50/75% gridlines, area gradient, line, end-point with drop-shadow.
+// Pair charts (disk r/w, net up/down) show two series with inline legend
+// in the card header and 1.15× headroom in the Y scale.
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
+import { FS, TOKENS } from '../../theme';
+import {
+  SaveTextFile,
+  StartResourceMonitor,
+  StopResourceMonitor,
+} from '../../../wailsjs/go/main/App';
+import { EventsOn } from '../../../wailsjs/runtime/runtime';
+import { ContextMenu } from './primitives';
+import type { ContextMenuItem } from './primitives';
+
+export type ResourceSample = {
+  ts: number;
+  cpuPct: number;
+  memUsedKB: number;
+  memTotalKB: number;
+  diskRdKBs: number;
+  diskWrKBs: number;
+  netRxKBs: number;
+  netTxKBs: number;
+  uptime: number;
+  loadAvg1: number;
+  diskUsedKB: number;
+  diskTotalKB: number;
+  // v3 extras — present when the remote poller emits them.
+  memCachedKB?: number;
+  memBuffersKB?: number;
+  dfText?: string;
+  whoText?: string;
+  user?: string;
+};
+
+// Module-scoped sample store. Keyed by host (`user@host:port`) so two
+// panes connected to the same remote share a single buffer and a
+// single backend poller — opening N tabs to the same server still
+// only fetches /proc once.
+//
+// Each entry tracks every paneId that has at least one active hook
+// instance. One of those panes is the "owner" — the backend's
+// StartResourceMonitor is called against it so samples land on
+// `resource:sample:{owner}`. When the owner unmounts or goes
+// Disconnected, ownership transfers to another connected pane on the
+// same host. If none remain, the poller stops; the buffer stays so
+// reopening a panel restores history immediately.
+const MAX_BUFFER = 1800; // 30 min @ 1 Hz — matches the largest UI window.
+const MAX_HOSTS = 20; // LRU cap; idle hostKeys get evicted past this.
+
+type ResourceState = 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected';
+
+type BufferEntry = {
+  samples: ResourceSample[];
+  subscribers: Set<() => void>;
+  paneRefs: Map<string, number>; // paneId → live hook-instance count
+  paneStates: Map<string, ResourceState | null>;
+  owner: string | null; // paneId currently driving the backend poller
+  ownerOff: (() => void) | null; // current EventsOn cleanup
+  lastTouched: number;
+  // Local wall-clock (Date.now) of the most recent sample arrival. Drives
+  // the "running" heuristic. Deliberately NOT the sample's own `ts`: that
+  // is the *remote* host's clock, so a skewed remote (common on Windows
+  // VMs / boxes not NTP-synced to the client) would make every sample look
+  // stale and the panel would show "not running" while data is flowing.
+  lastSampleAt: number;
+};
+const buffers = new Map<string, BufferEntry>();
+
+/** Build the host key used to dedupe pollers. Returns null for session
+ * types that aren't SSH-backed (shell / wsl / ftp / sftp / s3) — those
+ * don't share polling state.
+ *
+ * EC2 sessions don't carry a stored `host` (it's resolved at dial time
+ * via DescribeInstances, and the public DNS can rotate between
+ * stop/start), so we key them on the stable triple
+ * (region, instanceId, ssh-user) instead. Two tabs pointing at the
+ * same instance share the same key even if AWS hands out a different
+ * public IP between connects. */
+export function hostKeyFor(session: {
+  type?: string;
+  user?: string;
+  host?: string;
+  port?: number;
+  instanceId?: string;
+  region?: string;
+} | null | undefined): string | null {
+  if (!session) return null;
+  if (session.type === 'awsec2') {
+    if (!session.instanceId) return null;
+    const user = session.user || '';
+    const region = session.region || '';
+    return `ec2:${region}:${session.instanceId}:${user}`;
+  }
+  if (session.type !== 'ssh') return null;
+  if (!session.host) return null;
+  const user = session.user || '';
+  const port = session.port || 22;
+  return `${user}@${session.host}:${port}`;
+}
+
+// Clear the rolling buffer for a host. Subscribers (mounted panels)
+// are notified so the chart redraws immediately. Backend poller keeps
+// running — only the in-memory history is wiped.
+export function resetResourceBuffer(hostKey: string | null): void {
+  if (!hostKey) return;
+  const entry = buffers.get(hostKey);
+  if (!entry) return;
+  entry.samples = [];
+  entry.lastTouched = Date.now();
+  for (const sub of entry.subscribers) sub();
+}
+
+// Snapshot the current buffer for a host. Used by the "Export to CSV"
+// context-menu action — returns the latest array without mutating it.
+export function getResourceBuffer(hostKey: string | null): ResourceSample[] {
+  if (!hostKey) return [];
+  const entry = buffers.get(hostKey);
+  if (!entry) return [];
+  return entry.samples.slice();
+}
+
+function ensureBuffer(hostKey: string): BufferEntry {
+  let entry = buffers.get(hostKey);
+  if (entry) {
+    entry.lastTouched = Date.now();
+    return entry;
+  }
+  if (buffers.size >= MAX_HOSTS) {
+    // Evict the least-recently-touched idle entry — one with no live
+    // subscribers AND no active poller (owner), so we never tear down a
+    // host that still has an open tab driving its poller.
+    let oldestKey: string | null = null;
+    let oldestTs = Infinity;
+    for (const [k, v] of buffers) {
+      if (v.subscribers.size === 0 && v.owner === null && v.lastTouched < oldestTs) {
+        oldestTs = v.lastTouched;
+        oldestKey = k;
+      }
+    }
+    if (oldestKey) {
+      const ev = buffers.get(oldestKey);
+      try {
+        ev?.ownerOff?.();
+      } catch {
+        /* ignore */
+      }
+      buffers.delete(oldestKey);
+    }
+  }
+  entry = {
+    samples: [],
+    subscribers: new Set(),
+    paneRefs: new Map(),
+    paneStates: new Map(),
+    owner: null,
+    ownerOff: null,
+    lastTouched: Date.now(),
+    lastSampleAt: 0,
+  };
+  buffers.set(hostKey, entry);
+  return entry;
+}
+
+function pickOwner(entry: BufferEntry): string | null {
+  // Prefer the current owner if it's still a connected candidate, so
+  // we don't churn the backend during transient state changes.
+  if (entry.owner && entry.paneRefs.has(entry.owner)) {
+    if (entry.paneStates.get(entry.owner) === 'Connected') return entry.owner;
+  }
+  for (const [pid] of entry.paneRefs) {
+    if (entry.paneStates.get(pid) === 'Connected') return pid;
+  }
+  return null;
+}
+
+function setOwner(entry: BufferEntry, newOwner: string | null) {
+  if (entry.owner === newOwner) return;
+  const prev = entry.owner;
+  if (prev) {
+    try {
+      entry.ownerOff?.();
+    } catch {
+      /* ignore */
+    }
+    entry.ownerOff = null;
+    void StopResourceMonitor(prev).catch(() => {});
+  }
+  entry.owner = newOwner;
+  if (!newOwner) return;
+  entry.ownerOff = EventsOn(`resource:sample:${newOwner}`, (s: ResourceSample) => {
+    if (entry.samples.length >= MAX_BUFFER) {
+      entry.samples.splice(0, entry.samples.length - MAX_BUFFER + 1);
+    }
+    entry.samples.push(s);
+    const now = Date.now();
+    entry.lastTouched = now;
+    entry.lastSampleAt = now;
+    for (const sub of entry.subscribers) sub();
+  });
+  void StartResourceMonitor(newOwner).catch(() => {});
+}
+
+// syncResourceHosts is the single source of truth for which hosts are
+// being polled. App calls it with the full set of open panes (across all
+// tabs) whenever tabs or pane states change. A host's poller runs while
+// at least one Connected pane to it is open — independent of which tab is
+// focused — and stops the moment the last tab/pane for that host closes.
+// The StatusBar / ResourcePanel hooks are pure consumers (they subscribe
+// to read samples) and no longer drive the poller lifetime.
+let syncedHosts = new Set<string>();
+export function syncResourceHosts(
+  panes: Array<{ hostKey: string | null; paneId: string; state: ResourceState | null }>,
+): void {
+  const desired = new Map<string, Map<string, ResourceState | null>>();
+  for (const p of panes) {
+    if (!p.hostKey || !p.paneId) continue;
+    let m = desired.get(p.hostKey);
+    if (!m) {
+      m = new Map();
+      desired.set(p.hostKey, m);
+    }
+    m.set(p.paneId, p.state);
+  }
+  // Hosts with ≥1 open pane: refresh refs/states and (re)pick the owner.
+  for (const [hostKey, paneMap] of desired) {
+    const entry = ensureBuffer(hostKey);
+    entry.paneRefs = new Map();
+    for (const id of paneMap.keys()) entry.paneRefs.set(id, 1);
+    entry.paneStates = new Map(paneMap);
+    setOwner(entry, pickOwner(entry));
+  }
+  // Hosts that dropped to zero open panes since the last sync: stop the
+  // poller AND discard the buffered history. The samples were tied to a
+  // now-closed connection; keeping them would show stale, frozen data
+  // when a tab to the same server is reopened (the reopened tab is a
+  // fresh connection that should start the chart from scratch).
+  for (const hostKey of syncedHosts) {
+    if (desired.has(hostKey)) continue;
+    const entry = buffers.get(hostKey);
+    if (!entry) continue;
+    entry.paneRefs = new Map();
+    entry.paneStates = new Map();
+    setOwner(entry, null); // → StopResourceMonitor(prev owner)
+    entry.samples = [];
+    for (const sub of entry.subscribers) sub(); // redraw empty if still mounted
+  }
+  syncedHosts = new Set(desired.keys());
+}
+
+// Pure consumer hook: subscribe to a host's sample buffer for re-render
+// and return the windowed samples. Poller lifetime is owned by
+// syncResourceHosts, so this hook no longer needs the pane id or state.
+export function useResourceMonitor(hostKey: string | null, capacity = 1800) {
+  // `version` is bumped from the EventsOn callback (via `sub`) each
+  // time a sample arrives. Components downstream use it as a memo key
+  // — without it, `entry.samples` is mutated in place and would have
+  // the same array reference across renders, so cards/charts wouldn't
+  // re-derive their views.
+  const [version, setVersion] = useState(0);
+
+  // Pure consumer: subscribe to the host's buffer to re-render on each new
+  // sample. Poller ownership/lifetime is driven by syncResourceHosts (fed
+  // from App's open-pane set), not by this hook — so opening or closing a
+  // panel never starts or stops fetching; only opening/closing tabs does.
+  useEffect(() => {
+    if (!hostKey) return;
+    const entry = ensureBuffer(hostKey);
+    const sub = () => setVersion((v) => v + 1);
+    entry.subscribers.add(sub);
+    sub();
+    return () => {
+      entry.subscribers.delete(sub);
+    };
+  }, [hostKey]);
+
+  // Snapshot the rolling buffer into a fresh array. Re-slices only when
+  // `version` bumps (new sample) or capacity / hostKey changes —
+  // unrelated parent re-renders return the cached array.
+  const samples = useMemo(() => {
+    const entry = hostKey ? buffers.get(hostKey) : null;
+    if (!entry) return EMPTY_SAMPLES;
+    const all = entry.samples;
+    return all.slice(Math.max(0, all.length - capacity));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostKey, capacity, version]);
+  const latest = samples.length > 0 ? samples[samples.length - 1] : null;
+  // Treat the monitor as running if a sample *arrived locally* within the
+  // last 5 seconds (the poller emits at 1 Hz, so a longer gap means it
+  // stalled or the connection dropped). We compare against the local
+  // arrival time, not the sample's remote `ts`, so a clock-skewed remote
+  // doesn't make a live monitor look stalled. A new sample bumps `version`
+  // (state), which re-renders this hook's consumer and recomputes `running`.
+  const entry = hostKey ? buffers.get(hostKey) : null;
+  const running =
+    entry && entry.lastSampleAt > 0 ? Date.now() - entry.lastSampleAt < 5000 : false;
+  return { samples, latest, running };
+}
+
+const EMPTY_SAMPLES: ResourceSample[] = [];
+
+type Props = {
+  paneId: string | null;
+  paneState: 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected' | null;
+  hostKey: string | null;
+};
+
+type Win = '1m' | '10m' | '30m';
+const WIN_POINTS: Record<Win, number> = { '1m': 60, '10m': 600, '30m': 1800 };
+
+// Design accent colors for the pair charts.
+const COLOR_READ = 'oklch(0.84 0.14 165)';
+const COLOR_WRITE = 'oklch(0.78 0.16 290)';
+const COLOR_DOWN = 'oklch(0.78 0.12 240)';
+const COLOR_UP = 'oklch(0.78 0.14 70)';
+
+export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
+  const { samples, latest, running } = useResourceMonitor(hostKey, 1800);
+  const [win, setWin] = useState<Win>('1m');
+  const points = WIN_POINTS[win];
+  const view = useMemo(() => samples.slice(-points), [samples, points]);
+  // Derive all four charts' series arrays in a single pass over `view`,
+  // memoized so the (up to 1800-element) arrays are rebuilt only when the
+  // window actually changes — not on every unrelated re-render.
+  const series = useMemo(() => {
+    const cpu: number[] = [];
+    const mem: number[] = [];
+    const diskRd: number[] = [];
+    const diskWr: number[] = [];
+    const netRx: number[] = [];
+    const netTx: number[] = [];
+    for (const s of view) {
+      cpu.push(s.cpuPct);
+      mem.push(s.memTotalKB > 0 ? (s.memUsedKB / s.memTotalKB) * 100 : 0);
+      diskRd.push(s.diskRdKBs);
+      diskWr.push(s.diskWrKBs);
+      netRx.push(s.netRxKBs);
+      netTx.push(s.netTxKBs);
+    }
+    return { cpu, mem, diskRd, diskWr, netRx, netTx };
+  }, [view]);
+
+  // Right-click menu: Reset / Export to CSV. Stays out of the early
+  // return below so the menu is available even when no samples have
+  // arrived yet (the menu items themselves are disabled in that case).
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  const onPanelContext = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setCtxMenu({ x: e.clientX, y: e.clientY });
+  };
+  const onResetBuffer = () => {
+    resetResourceBuffer(hostKey);
+  };
+  const onExportCsv = async () => {
+    const data = getResourceBuffer(hostKey);
+    if (data.length === 0) return;
+    const header = [
+      'unix_ts_seconds',
+      'iso_time',
+      'cpu_pct',
+      'mem_used_kb',
+      'mem_total_kb',
+      'disk_read_kbs',
+      'disk_write_kbs',
+      'net_rx_kbs',
+      'net_tx_kbs',
+      'uptime_seconds',
+      'load_avg_1m',
+      'disk_used_kb',
+      'disk_total_kb',
+    ].join(',');
+    const lines: string[] = [header];
+    for (const s of data) {
+      lines.push(
+        [
+          Math.floor(s.ts / 1000),
+          new Date(s.ts).toISOString(),
+          s.cpuPct.toFixed(2),
+          s.memUsedKB,
+          s.memTotalKB,
+          s.diskRdKBs.toFixed(2),
+          s.diskWrKBs.toFixed(2),
+          s.netRxKBs.toFixed(2),
+          s.netTxKBs.toFixed(2),
+          s.uptime,
+          s.loadAvg1.toFixed(2),
+          s.diskUsedKB,
+          s.diskTotalKB,
+        ].join(','),
+      );
+    }
+    const csv = lines.join('\n') + '\n';
+    // Sanitize hostKey for filename: ec2:region:id:user or user@host:port
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const hostPart = (hostKey || 'host').replace(/[^A-Za-z0-9._@-]/g, '_');
+    const suggested = `resources-${hostPart}-${stamp}.csv`;
+    try {
+      await SaveTextFile(suggested, csv);
+    } catch (e) {
+      // Surface in console — there's no error banner inside this
+      // panel; the user can re-trigger if the save dialog was OK
+      // dismissed before the path was written.
+      console.error('SaveTextFile failed:', e);
+    }
+  };
+
+  const totalMemGB = latest ? latest.memTotalKB / 1024 / 1024 : null;
+  const memUsedGB = latest ? latest.memUsedKB / 1024 / 1024 : null;
+  const memPct = latest && latest.memTotalKB > 0 ? (latest.memUsedKB / latest.memTotalKB) * 100 : 0;
+  const noSession = !paneId;
+  const notConnected = !noSession && paneState && paneState !== 'Connected';
+  const connected = !noSession && !notConnected;
+
+  const sampleCount = samples.length;
+  const ctxItems: ContextMenuItem[] = [
+    {
+      kind: 'item',
+      label: 'Reset',
+      onClick: onResetBuffer,
+      disabled: sampleCount === 0,
+    },
+    {
+      kind: 'item',
+      label: `Export to CSV${sampleCount > 0 ? ` (${sampleCount})` : ''}`,
+      onClick: () => void onExportCsv(),
+      disabled: sampleCount === 0,
+    },
+  ];
+
+  return (
+    <div style={wrap} onContextMenu={onPanelContext}>
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={ctxItems}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
+      {noSession && <div style={emptyState}>No active session.</div>}
+      {notConnected && (
+        <div style={emptyState}>
+          Pane is {(paneState as string).toLowerCase()}. Resource monitor starts when the
+          session connects.
+        </div>
+      )}
+      {connected && (
+        <div style={{ display: 'contents' }}>
+          <div style={headerRow}>
+            <WindowSwitch value={win} onChange={setWin} />
+          </div>
+
+          {!running && (
+            <div style={notRunning}>
+              {sampleCount === 0
+                ? 'Starting resource monitor… (the first sample can take a few seconds, longer on Windows)'
+                : 'Resource monitor stalled — no recent samples.'}
+            </div>
+          )}
+
+          <Card
+            label="CPU"
+            value={latest ? `${Math.round(latest.cpuPct)}%` : '—'}
+            data={series.cpu}
+            color={TOKENS.accent}
+            max={100}
+            slots={points}
+          />
+          <Card
+            label="Memory"
+            value={
+              latest && totalMemGB !== null && memUsedGB !== null
+                ? `${memUsedGB.toFixed(2)} / ${totalMemGB.toFixed(2)} GB`
+                : '—'
+            }
+            data={series.mem}
+            color={TOKENS.info}
+            max={100}
+            slots={points}
+            legend={totalMemGB ? `of ${totalMemGB.toFixed(2)} GB` : null}
+          />
+          <Pair
+            label="Disk I/O"
+            slots={points}
+            series={[
+              { name: 'read', value: latest ? formatRate(latest.diskRdKBs) : '—', data: series.diskRd, color: COLOR_READ },
+              { name: 'write', value: latest ? formatRate(latest.diskWrKBs) : '—', data: series.diskWr, color: COLOR_WRITE },
+            ]}
+          />
+          <Pair
+            label="Network"
+            slots={points}
+            series={[
+              { name: 'down', value: latest ? formatRate(latest.netRxKBs) : '—', data: series.netRx, color: COLOR_DOWN },
+              { name: 'up', value: latest ? formatRate(latest.netTxKBs) : '—', data: series.netTx, color: COLOR_UP },
+            ]}
+          />
+
+          {latest && (
+            <div style={footRow}>
+              <span style={footLbl}>UPTIME</span>
+              <span style={footVal}>{formatUptime(latest.uptime)}</span>
+              <span style={{ flex: 1 }} />
+              <span style={footLbl}>LOAD</span>
+              <span style={footVal}>{latest.loadAvg1.toFixed(2)}</span>
+              <span style={{ color: TOKENS.fgMute, fontSize: FS.xs }}>
+                ({memPct.toFixed(0)}% mem)
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+      {/* Flex spacer so the panel fills the available height and the
+          empty area still responds to right-click. */}
+      <div style={{ flex: '1 1 auto', minHeight: 0 }} />
+    </div>
+  );
+}
+
+function WindowSwitch({ value, onChange }: { value: Win; onChange: (w: Win) => void }) {
+  const opts: Win[] = ['1m', '10m', '30m'];
+  return (
+    <div
+      role="radiogroup"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        padding: 2,
+        gap: 1,
+        background: 'rgba(255,255,255,0.04)',
+        boxShadow: `inset 0 0 0 1px ${TOKENS.border}`,
+        borderRadius: 7,
+        marginLeft: 'auto',
+      }}
+    >
+      {opts.map((w) => {
+        const active = w === value;
+        return (
+          <button
+            key={w}
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(w)}
+            style={{
+              appearance: 'none',
+              border: 0,
+              cursor: 'pointer',
+              padding: '3px 8px',
+              borderRadius: 5,
+              font: `540 ${FS.sm}px/1 ${TOKENS.mono}`,
+              letterSpacing: '.02em',
+              color: active ? TOKENS.fg : TOKENS.fgDim,
+              background: active
+                ? 'linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04))'
+                : 'transparent',
+              boxShadow: active ? `inset 0 0 0 1px ${TOKENS.borderHi}` : 'none',
+              transition: 'background .12s, color .12s',
+            }}
+          >
+            {w}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function Card({
+  label,
+  value,
+  data,
+  color,
+  max = 100,
+  slots,
+  legend,
+}: {
+  label: string;
+  value: string;
+  data: number[];
+  color: string;
+  max?: number;
+  slots: number;
+  legend?: string | null;
+}) {
+  return (
+    <div style={cardStyle}>
+      <div style={cardHeader}>
+        <span style={cardLabel}>{label}</span>
+        <span style={{ flex: 1 }} />
+        <span style={cardValue(color)}>{value}</span>
+      </div>
+      <BigSpark data={data} color={color} max={max} slots={slots} height={56} />
+      {legend && <div style={cardLegend}>{legend}</div>}
+    </div>
+  );
+}
+
+type PairSeries = { name: string; value: string; data: number[]; color: string };
+function Pair({ label, slots, series }: { label: string; slots: number; series: PairSeries[] }) {
+  let mx = 0.5;
+  for (const s of series) for (const v of s.data) if (v > mx) mx = v;
+  const finalMax = mx * 1.15;
+  return (
+    <div style={cardStyle}>
+      <div style={cardHeader}>
+        <span style={cardLabel}>{label}</span>
+        <span style={{ flex: 1 }} />
+        {series.map((s) => (
+          <span
+            key={s.name}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              marginLeft: 10,
+              font: `${FS.sm}px/1 ${TOKENS.mono}`,
+              color: TOKENS.fgDim,
+            }}
+          >
+            <span
+              style={{
+                width: 8,
+                height: 2.5,
+                borderRadius: 1.5,
+                background: s.color,
+                boxShadow: `0 0 6px ${s.color}`,
+              }}
+            />
+            <span
+              style={{
+                color: TOKENS.fgMute,
+                textTransform: 'uppercase',
+                letterSpacing: '.05em',
+                fontSize: FS.xs,
+              }}
+            >
+              {s.name}
+            </span>
+            <span style={{ color: TOKENS.fg }}>{s.value}</span>
+          </span>
+        ))}
+      </div>
+      <PairSpark series={series} max={finalMax} slots={slots} height={56} />
+    </div>
+  );
+}
+
+// Slot-based positioning: each sample occupies one fixed-width slot, so a
+// fresh chart fills from the right edge over time instead of stretching
+// the first sample across the whole pane. With `slots` = 60 (1 min window)
+// and only 5 samples buffered, those samples occupy the rightmost 5/60
+// of the chart; the rest stays empty until more data arrives.
+function slotX(i: number, n: number, slots: number, w: number): number {
+  const slotIdx = slots - n + i; // 0 = leftmost (oldest), slots-1 = rightmost (newest)
+  const denom = Math.max(1, slots - 1);
+  return (slotIdx / denom) * (w - 2) + 1;
+}
+
+function BigSpark({
+  data,
+  color,
+  max,
+  slots,
+  height,
+}: {
+  data: number[];
+  color: string;
+  max: number;
+  slots: number;
+  height: number;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [w, setW] = useState(220);
+  useEffect(() => {
+    if (!ref.current) return;
+    const ro = new ResizeObserver((entries) => {
+      const cw = entries[0]?.contentRect?.width || 220;
+      setW(Math.max(80, Math.round(cw)));
+    });
+    ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, []);
+  const n = data.length;
+  const gid = `bspark-${color.replace(/[^a-z0-9]/gi, '')}`;
+  // Empty / single-point cases skip the line+area drawing but still render
+  // the frame and gridlines so the chart doesn't pop into existence.
+  const showLine = n >= 2;
+  const pts: Array<[number, number]> = data.map((v, i) => {
+    const x = slotX(i, n, slots, w);
+    const y = height - (clamp(v, 0, max) / max) * (height - 6) - 3;
+    return [x, y];
+  });
+  const linePath = pts
+    .map(([x, y], i) => (i === 0 ? `M${x.toFixed(2)} ${y.toFixed(2)}` : `L${x.toFixed(2)} ${y.toFixed(2)}`))
+    .join(' ');
+  const areaPath = showLine
+    ? `${linePath} L${pts[pts.length - 1][0].toFixed(2)} ${height - 1} L${pts[0][0].toFixed(2)} ${height - 1} Z`
+    : '';
+  const last = pts[pts.length - 1];
+  return (
+    <div ref={ref} style={{ width: '100%' }}>
+      <svg width={w} height={height} style={{ display: 'block' }}>
+        <defs>
+          <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor={color} stopOpacity={0.4} />
+            <stop offset="1" stopColor={color} stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <rect x={0.5} y={0.5} width={w - 1} height={height - 1} rx={4} fill="none" stroke="rgba(255,255,255,0.07)" />
+        {[0.25, 0.5, 0.75].map((t) => (
+          <line key={t} x1={1} x2={w - 1} y1={height * t} y2={height * t} stroke="rgba(255,255,255,0.05)" strokeDasharray="2 3" />
+        ))}
+        {showLine && <path d={areaPath} fill={`url(#${gid})`} />}
+        {showLine && (
+          <path d={linePath} fill="none" stroke={color} strokeWidth="1.3" strokeLinejoin="round" strokeLinecap="round" />
+        )}
+        {last && (
+          <circle cx={last[0]} cy={last[1]} r={2} fill={color} style={{ filter: `drop-shadow(0 0 4px ${color})` }} />
+        )}
+      </svg>
+    </div>
+  );
+}
+
+function PairSpark({
+  series,
+  max,
+  slots,
+  height,
+}: {
+  series: PairSeries[];
+  max: number;
+  slots: number;
+  height: number;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [w, setW] = useState(220);
+  useEffect(() => {
+    if (!ref.current) return;
+    const ro = new ResizeObserver((entries) => {
+      const cw = entries[0]?.contentRect?.width || 220;
+      setW(Math.max(80, Math.round(cw)));
+    });
+    ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, []);
+  return (
+    <div ref={ref} style={{ width: '100%' }}>
+      <svg width={w} height={height} style={{ display: 'block' }}>
+        <rect x={0.5} y={0.5} width={w - 1} height={height - 1} rx={4} fill="none" stroke="rgba(255,255,255,0.07)" />
+        {[0.25, 0.5, 0.75].map((t) => (
+          <line key={t} x1={1} x2={w - 1} y1={height * t} y2={height * t} stroke="rgba(255,255,255,0.05)" strokeDasharray="2 3" />
+        ))}
+        {series.map((s, idx) => {
+          const n = s.data.length;
+          if (n === 0) return null;
+          const showLine = n >= 2;
+          const pts: Array<[number, number]> = s.data.map((v, i) => {
+            const x = slotX(i, n, slots, w);
+            const y = height - (clamp(v, 0, max) / max) * (height - 6) - 3;
+            return [x, y];
+          });
+          const linePath = pts
+            .map(([x, y], i) => (i === 0 ? `M${x.toFixed(2)} ${y.toFixed(2)}` : `L${x.toFixed(2)} ${y.toFixed(2)}`))
+            .join(' ');
+          const areaPath = showLine
+            ? `${linePath} L${pts[pts.length - 1][0].toFixed(2)} ${height - 1} L${pts[0][0].toFixed(2)} ${height - 1} Z`
+            : '';
+          const last = pts[pts.length - 1];
+          const gid = `pspark-${s.color.replace(/[^a-z0-9]/gi, '')}-${idx}`;
+          return (
+            <g key={s.name}>
+              <defs>
+                <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stopColor={s.color} stopOpacity={0.3} />
+                  <stop offset="1" stopColor={s.color} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              {showLine && <path d={areaPath} fill={`url(#${gid})`} />}
+              {showLine && (
+                <path
+                  d={linePath}
+                  fill="none"
+                  stroke={s.color}
+                  strokeWidth="1.3"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+              )}
+              {last && (
+                <circle cx={last[0]} cy={last[1]} r={2} fill={s.color} style={{ filter: `drop-shadow(0 0 4px ${s.color})` }} />
+              )}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function formatRate(kbs: number): string {
+  if (kbs < 1024) return `${kbs.toFixed(2)} KB/s`;
+  return `${(kbs / 1024).toFixed(2)} MB/s`;
+}
+
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
+}
+
+function clamp(x: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, x));
+}
+
+const wrap: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 10, padding: '0 12px 14px' };
+const headerRow: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, paddingBottom: 4 };
+const notRunning: CSSProperties = {
+  padding: '6px 10px',
+  background: 'rgba(255,200,90,0.10)',
+  color: 'rgba(255,216,110,0.92)',
+  fontSize: FS.base,
+  borderRadius: 6,
+};
+const cardStyle: CSSProperties = {
+  padding: '10px 12px 8px',
+  borderRadius: 10,
+  background: 'rgba(255,255,255,0.025)',
+  boxShadow: `inset 0 0 0 1px ${TOKENS.border}`,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 8,
+};
+const cardHeader: CSSProperties = { display: 'flex', alignItems: 'baseline', gap: 6 };
+const cardLabel: CSSProperties = {
+  font: `600 ${FS.sm}px/1 ${TOKENS.font}`,
+  color: TOKENS.fgMute,
+  textTransform: 'uppercase',
+  letterSpacing: '.08em',
+};
+function cardValue(c: string): CSSProperties {
+  return {
+    font: `540 ${FS.lg}px/1 ${TOKENS.mono}`,
+    color: TOKENS.fg,
+    textShadow: `0 0 8px ${c}`,
+    fontVariantNumeric: 'tabular-nums',
+  };
+}
+const cardLegend: CSSProperties = { font: `${FS.sm}px/1 ${TOKENS.font}`, color: TOKENS.fgMute };
+const footRow: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  paddingTop: 2,
+  fontSize: FS.base,
+};
+const footLbl: CSSProperties = {
+  font: `600 ${FS.xs}px/1 ${TOKENS.font}`,
+  textTransform: 'uppercase',
+  letterSpacing: '.08em',
+  color: TOKENS.fgMute,
+};
+const footVal: CSSProperties = { fontFamily: TOKENS.mono, color: TOKENS.fg };
+const emptyState: CSSProperties = { padding: 16, color: TOKENS.fgMute, fontSize: FS.base };

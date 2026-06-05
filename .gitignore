@@ -1,0 +1,42 @@
+# Build outputs
+app/build/bin/
+app/frontend/dist/*
+!app/frontend/dist/gitkeep
+app/frontend/wailsjs/
+app/frontend/package.json.md5
+
+# Test coverage reports
+app/frontend/coverage/
+app/cover.out
+
+# Dependencies
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Binaries / debug
+*.exe
+*.test
+*.prof
+*.log
+
+# Local config
+.env
+.env.local
+*.local
+
+# Docs (handoff materials, design bundle) — not part of the repo
+docs/
+
+# Project context for Claude — local only
+CLAUDE.md
+.claude/

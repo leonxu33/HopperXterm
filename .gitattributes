@@ -1,0 +1,2 @@
+# Shell scripts run on macOS — CRLF breaks bash. Keep them LF everywhere.
+*.sh text eol=lf
