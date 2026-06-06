@@ -12,7 +12,7 @@ import { ICON, FS, TOKENS } from '../../theme';
 import { isMac } from '../../lib/platform';
 import {
   ALL_KINDS,
-  availableKinds,
+  availableScopes,
   chordIsBindable,
   chordLabel,
   getCustomKeys,
@@ -20,8 +20,9 @@ import {
   normalizeKey,
   parseSeq,
   setCustomKeys,
+  toggleScope,
   type CustomKey,
-  type TermKind,
+  type BindingScope,
 } from '../../lib/customKeys';
 import { Modal, Field, TextInput, PrimaryButton, GhostButton } from './Modal';
 import { renderBytes } from './bytePreview';
@@ -30,14 +31,16 @@ import { keycap } from './shortcutsData';
 // Terminal-kind labels: SSH panes are split by the remote shell family (the
 // line editor that receives the bytes); local shell and WSL are their own
 // scopes. Resolution lives in lib/customKeys.shellKind.
-const KIND_LABELS: Record<TermKind, string> = {
+const KIND_LABELS: Record<BindingScope, string> = {
+  'ssh-all': 'SSH: all (any OS)',
   'ssh-windows': 'SSH: Windows cmd / PowerShell',
   'ssh-linux': 'SSH: Linux shell',
   'ssh-macos': 'SSH: macOS zsh',
   local: 'Local shell',
   wsl: 'WSL',
 };
-const KIND_LABELS_SHORT: Record<TermKind, string> = {
+const KIND_LABELS_SHORT: Record<BindingScope, string> = {
+  'ssh-all': 'SSH all',
   'ssh-windows': 'SSH Windows',
   'ssh-linux': 'SSH Linux',
   'ssh-macos': 'SSH macOS',
@@ -114,9 +117,10 @@ export function CustomKeysModal({ onClose }: Props) {
                 shift: false,
                 meta: false,
                 seq: '',
-                // Default to every kind this host offers (WSL is hidden on
-                // non-Windows — see availableKinds).
-                kinds: availableKinds(),
+                // Default to every scope this host offers — all concrete
+                // kinds plus the additive "SSH: all" (WSL is hidden on
+                // non-Windows — see availableScopes).
+                kinds: availableScopes(),
               })
             }
           >
@@ -147,7 +151,9 @@ export function CustomKeysModal({ onClose }: Props) {
                 {b.seq}
               </code>
               <span style={{ flexShrink: 0, color: TOKENS.fgMute, fontSize: FS.sm }}>
-                {b.kinds.length === ALL_KINDS.length ? 'All terminals' : b.kinds.map((k) => KIND_LABELS_SHORT[k]).join(' · ')}
+                {ALL_KINDS.every((k) => b.kinds.includes(k))
+                  ? 'All terminals'
+                  : b.kinds.map((k) => KIND_LABELS_SHORT[k]).join(' · ')}
               </span>
               <IconBtn title="Edit" onClick={() => setEditing(b)}>
                 <svg width={ICON.sm} height={ICON.sm} viewBox="0 0 16 16" fill="none">
@@ -184,7 +190,7 @@ function BindingEditor({
 }) {
   const [chord, setChord] = useState<Chord | null>(binding.key ? binding : null);
   const [seq, setSeq] = useState(binding.seq);
-  const [kinds, setKinds] = useState<TermKind[]>(binding.kinds);
+  const [kinds, setKinds] = useState<BindingScope[]>(binding.kinds);
   const [capturing, setCapturing] = useState(false);
 
   const parsed = parseSeq(seq);
@@ -308,10 +314,12 @@ function BindingEditor({
           leftmost pill on empty-space clicks (see Field). */}
       <Field label="Applies to" plain>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {/* availableKinds: no WSL pill on non-Windows hosts. A hidden kind
-              already on the binding (e.g. config imported from Windows) is
-              preserved untouched — the pills only toggle what they show. */}
-          {availableKinds().map((k) => {
+          {/* availableScopes: the concrete kinds plus the additive
+              "SSH: all" pill (no WSL pill on non-Windows hosts). A hidden
+              kind already on the binding (e.g. config imported from
+              Windows) is preserved untouched — the pills only toggle what
+              they show. */}
+          {availableScopes().map((k) => {
             const on = kinds.includes(k);
             return (
               <button
@@ -319,7 +327,7 @@ function BindingEditor({
                 type="button"
                 role="checkbox"
                 aria-checked={on}
-                onClick={() => setKinds(on ? kinds.filter((x) => x !== k) : [...kinds, k])}
+                onClick={() => setKinds(toggleScope(kinds, k))}
                 style={{
                   ...kindPill,
                   background: on ? TOKENS.accentDim : 'rgba(255,255,255,0.05)',

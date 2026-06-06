@@ -26,12 +26,47 @@ import { hasWSL, hostPlatform, isMac } from './platform';
 export type TermKind = 'ssh-windows' | 'ssh-linux' | 'ssh-macos' | 'local' | 'wsl';
 export const ALL_KINDS: TermKind[] = ['ssh-windows', 'ssh-linux', 'ssh-macos', 'local', 'wsl'];
 
-/** Kinds offered in the editor on this host: the WSL pill is hidden where
- *  WSL doesn't exist (lib/platform.hasWSL — same rule as the New Session
- *  tiles). A hidden kind is still honored at match time, so imported
- *  configs keep working. */
+/** A binding's target scope: a concrete pane kind (above), or 'ssh-all' —
+ *  an ADDITIVE scope that matches every SSH pane regardless of remote OS
+ *  family. It stacks on top of any OS-specific scope (ssh-windows/linux/
+ *  macos), it is NOT a fallback: a binding scoped to both 'ssh-all' and an
+ *  OS-specific kind is active under both. 'ssh-all' is never a *pane* kind
+ *  (shellKind never returns it) — only something a binding can point at. */
+export type BindingScope = TermKind | 'ssh-all';
+export const ALL_SCOPES: BindingScope[] = ['ssh-all', 'ssh-windows', 'ssh-linux', 'ssh-macos', 'local', 'wsl'];
+
+/** Concrete kinds offered in the editor on this host: the WSL pill is
+ *  hidden where WSL doesn't exist (lib/platform.hasWSL — same rule as the
+ *  New Session tiles). A hidden kind is still honored at match time, so
+ *  imported configs keep working. Used as the default scope set for a new
+ *  binding (every real terminal; 'ssh-all' is opt-in). */
 export function availableKinds(host: string = hostPlatform()): TermKind[] {
   return hasWSL(host) ? ALL_KINDS : ALL_KINDS.filter((k) => k !== 'wsl');
+}
+
+/** Scopes offered as pills in the editor: the concrete kinds plus the
+ *  additive 'ssh-all'. Same WSL-hiding rule as availableKinds. */
+export function availableScopes(host: string = hostPlatform()): BindingScope[] {
+  return hasWSL(host) ? ALL_SCOPES : ALL_SCOPES.filter((k) => k !== 'wsl');
+}
+
+/** The OS-specific SSH scopes that 'ssh-all' is the umbrella for. */
+const SSH_OS_SCOPES: BindingScope[] = ['ssh-windows', 'ssh-linux', 'ssh-macos'];
+
+/** Toggle one scope pill in a binding's scope set, keeping 'ssh-all' and the
+ *  three OS-specific SSH scopes coherent: turning 'ssh-all' on also lights
+ *  every OS-specific SSH scope (so the user never sees "all SSH" with no
+ *  concrete OS), and turning any OS-specific SSH scope off clears 'ssh-all'
+ *  (it's no longer "all"). Other transitions are a plain add/remove. */
+export function toggleScope(current: BindingScope[], scope: BindingScope): BindingScope[] {
+  const on = current.includes(scope);
+  let next = on ? current.filter((s) => s !== scope) : [...current, scope];
+  if (scope === 'ssh-all' && !on) {
+    next = [...new Set([...next, ...SSH_OS_SCOPES])];
+  } else if (on && SSH_OS_SCOPES.includes(scope)) {
+    next = next.filter((s) => s !== 'ssh-all');
+  }
+  return next;
 }
 
 export type CustomKey = {
@@ -47,7 +82,7 @@ export type CustomKey = {
    *  Kept in source form so the editor round-trips exactly; expand with
    *  parseSeq() at send time. */
   seq: string;
-  kinds: TermKind[];
+  kinds: BindingScope[];
 };
 
 /** Resolve a pane's terminal kind (null = no terminal, e.g. file-only panes).
@@ -190,7 +225,12 @@ export function eventMatches(
   );
 }
 
-/** First binding matching this event for the given terminal kind, or null. */
+/** First binding matching this event for the given terminal kind, or null.
+ *  Two passes so the more-specific scope wins: a binding scoped to the
+ *  pane's exact kind is preferred, and only if none matches do SSH panes
+ *  fall through to the additive 'ssh-all' scope. (So when the same chord is
+ *  bound under both an OS-specific scope and 'ssh-all', the OS-specific one
+ *  takes effect — yet a chord bound *only* under 'ssh-all' still fires.) */
 export function matchCustomKey(
   bindings: CustomKey[],
   e: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>,
@@ -198,6 +238,11 @@ export function matchCustomKey(
 ): CustomKey | null {
   for (const b of bindings) {
     if (b.kinds.includes(kind) && eventMatches(b, e)) return b;
+  }
+  if (kind === 'ssh-windows' || kind === 'ssh-linux' || kind === 'ssh-macos') {
+    for (const b of bindings) {
+      if (b.kinds.includes('ssh-all') && eventMatches(b, e)) return b;
+    }
   }
   return null;
 }
@@ -236,9 +281,9 @@ function sanitize(v: unknown): CustomKey[] {
     const r = e as Record<string, unknown>;
     if (typeof r.key !== 'string' || r.key === '' || typeof r.seq !== 'string') continue;
     const kinds = Array.isArray(r.kinds)
-      ? ([...new Set(r.kinds.map(migrateKind))].filter((k): k is TermKind =>
-          ALL_KINDS.includes(k as TermKind),
-        ) as TermKind[])
+      ? ([...new Set(r.kinds.map(migrateKind))].filter((k): k is BindingScope =>
+          ALL_SCOPES.includes(k as BindingScope),
+        ) as BindingScope[])
       : [];
     if (kinds.length === 0) continue;
     out.push({

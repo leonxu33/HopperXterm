@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   availableKinds,
+  availableScopes,
   chordIsBindable,
   eventMatches,
   getCustomKeys,
@@ -9,6 +10,7 @@ import {
   parseSeq,
   setCustomKeys,
   shellKind,
+  toggleScope,
   type CustomKey,
 } from './customKeys';
 import { PREF_CUSTOM_TERM_KEYS, setPref } from './uiprefs';
@@ -71,6 +73,37 @@ describe('matchCustomKey', () => {
     expect(matchCustomKey(b, ev(), 'ssh-windows')).toBeNull();
     expect(matchCustomKey(b, ev(), 'wsl')).toBeNull();
   });
+
+  describe("'ssh-all' scope", () => {
+    it('matches every SSH pane regardless of remote OS, but not local/WSL', () => {
+      const b = [chord({ kinds: ['ssh-all'] })];
+      expect(matchCustomKey(b, ev(), 'ssh-linux')).toBe(b[0]);
+      expect(matchCustomKey(b, ev(), 'ssh-windows')).toBe(b[0]);
+      expect(matchCustomKey(b, ev(), 'ssh-macos')).toBe(b[0]);
+      expect(matchCustomKey(b, ev(), 'local')).toBeNull();
+      expect(matchCustomKey(b, ev(), 'wsl')).toBeNull();
+    });
+
+    it('is additive — both an ssh-all and an OS-specific binding stay live', () => {
+      const all = chord({ id: 'all', kinds: ['ssh-all'], key: 'k', seq: 'A' });
+      const lin = chord({ id: 'lin', kinds: ['ssh-linux'], key: 'j', seq: 'L' });
+      const b = [all, lin];
+      expect(matchCustomKey(b, ev({ key: 'k' }), 'ssh-linux')).toBe(all);
+      expect(matchCustomKey(b, ev({ key: 'j' }), 'ssh-linux')).toBe(lin);
+      // The OS-specific chord doesn't fire on a Windows pane; ssh-all does.
+      expect(matchCustomKey(b, ev({ key: 'j' }), 'ssh-windows')).toBeNull();
+      expect(matchCustomKey(b, ev({ key: 'k' }), 'ssh-windows')).toBe(all);
+    });
+
+    it('prefers the OS-specific binding when the same chord is in both scopes', () => {
+      const all = chord({ id: 'all', kinds: ['ssh-all'], seq: 'A' });
+      const lin = chord({ id: 'lin', kinds: ['ssh-linux'], seq: 'L' });
+      // 'ssh-all' listed first, yet the exact-kind match wins (pass 1).
+      expect(matchCustomKey([all, lin], ev(), 'ssh-linux')).toBe(lin);
+      // On a kind with no exact match, ssh-all still applies.
+      expect(matchCustomKey([all, lin], ev(), 'ssh-macos')).toBe(all);
+    });
+  });
 });
 
 describe('shellKind', () => {
@@ -102,6 +135,47 @@ describe('availableKinds', () => {
     expect(availableKinds('darwin')).not.toContain('wsl');
     expect(availableKinds('linux')).not.toContain('wsl');
     expect(availableKinds('darwin')).toContain('ssh-macos');
+  });
+  it('omits the additive ssh-all scope (concrete kinds only — it is the new-binding default)', () => {
+    expect(availableKinds('windows')).not.toContain('ssh-all');
+  });
+});
+
+describe('toggleScope', () => {
+  it('selecting ssh-all lights every OS-specific SSH scope too', () => {
+    const next = toggleScope(['local'], 'ssh-all');
+    expect(next).toContain('ssh-all');
+    expect(next).toContain('ssh-windows');
+    expect(next).toContain('ssh-linux');
+    expect(next).toContain('ssh-macos');
+    expect(next).toContain('local'); // untouched
+  });
+  it('unselecting any OS-specific SSH scope clears ssh-all', () => {
+    const next = toggleScope(['ssh-all', 'ssh-windows', 'ssh-linux', 'ssh-macos'], 'ssh-linux');
+    expect(next).not.toContain('ssh-all');
+    expect(next).not.toContain('ssh-linux');
+    expect(next).toContain('ssh-windows');
+    expect(next).toContain('ssh-macos');
+  });
+  it('deselecting ssh-all leaves the OS scopes in place', () => {
+    const next = toggleScope(['ssh-all', 'ssh-windows', 'ssh-linux', 'ssh-macos'], 'ssh-all');
+    expect(next).toEqual(['ssh-windows', 'ssh-linux', 'ssh-macos']);
+  });
+  it('selecting a single OS scope does not auto-enable ssh-all', () => {
+    expect(toggleScope([], 'ssh-linux')).toEqual(['ssh-linux']);
+  });
+  it('does not duplicate scopes already present', () => {
+    const next = toggleScope(['ssh-linux'], 'ssh-all');
+    expect(next.filter((s) => s === 'ssh-linux')).toHaveLength(1);
+  });
+});
+
+describe('availableScopes', () => {
+  it('adds the ssh-all pill to the concrete kinds, keeping the WSL rule', () => {
+    expect(availableScopes('windows')).toContain('ssh-all');
+    expect(availableScopes('windows')).toContain('wsl');
+    expect(availableScopes('darwin')).toContain('ssh-all');
+    expect(availableScopes('darwin')).not.toContain('wsl');
   });
 });
 
@@ -149,6 +223,12 @@ describe('persistence round-trip (uiprefs cache, no Wails backend)', () => {
     const list = getCustomKeys();
     expect(list[0].kinds).toEqual(['ssh-windows', 'ssh-linux', 'ssh-macos']);
     expect(list[1].kinds).toEqual(['ssh-linux']);
+  });
+  it('accepts the ssh-all scope', () => {
+    setPref(PREF_CUSTOM_TERM_KEYS, [
+      { key: 'l', ctrl: true, alt: true, seq: 'x', kinds: ['ssh-all', 'local'] },
+    ]);
+    expect(getCustomKeys()[0].kinds).toEqual(['ssh-all', 'local']);
   });
   it('tolerates a non-array value', () => {
     setPref(PREF_CUSTOM_TERM_KEYS, 'garbage');
