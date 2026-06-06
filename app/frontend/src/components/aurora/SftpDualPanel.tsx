@@ -1797,7 +1797,7 @@ function renderDualCell(
   switch (colKey) {
     case 'name':
       return (
-        <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
           {r.isDir ? <FolderIcon /> : <FileIcon exec={isExec(r.mode)} />}
           {renaming === r.name ? (
             <RenameInput initial={r.name} onCommit={(v) => onCommit(r.name, v)} onCancel={onCancel} />
@@ -1860,7 +1860,7 @@ function ColDivider({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => voi
 
 function FolderIcon() {
   return (
-    <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
+    <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none" style={{ flex: '0 0 auto' }}>
       <path
         d="M2 5 L2 12 A1 1 0 0 0 3 13 L13 13 A1 1 0 0 0 14 12 L14 6 A1 1 0 0 0 13 5 L8 5 L6.5 3.5 L3 3.5 A1 1 0 0 0 2 4.5 Z"
         fill="#7da9ff"
@@ -1875,7 +1875,7 @@ function FolderIcon() {
 function FileIcon({ exec }: { exec?: boolean }) {
   const c = exec ? TOKENS.accent : TOKENS.fgDim;
   return (
-    <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
+    <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none" style={{ flex: '0 0 auto' }}>
       <path d="M3 2 L10 2 L13 5 L13 14 L3 14 Z" stroke={c} strokeWidth="1.1" fill="none" />
       <path d="M10 2 L10 5 L13 5" stroke={c} strokeWidth="1.1" fill="none" />
     </svg>
