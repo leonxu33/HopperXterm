@@ -1802,16 +1802,36 @@ function renderDualCell(
           {renaming === r.name ? (
             <RenameInput initial={r.name} onCommit={(v) => onCommit(r.name, v)} onCancel={onCancel} />
           ) : (
-            <span
-              style={{
-                color: r.isDir ? TOKENS.dir : isExec(r.mode) ? TOKENS.accent : 'inherit',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {r.name}
-            </span>
+            <>
+              <span
+                style={{
+                  color: r.isDir ? TOKENS.dir : isExec(r.mode) ? TOKENS.accent : 'inherit',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  flex: '0 1 auto',
+                  minWidth: 0,
+                }}
+              >
+                {r.name}
+              </span>
+              {r.isSymlink && r.target && (
+                // Inline link target so a symlink reads as one at a glance.
+                <span
+                  style={{
+                    color: TOKENS.fgMute,
+                    fontSize: FS.sm,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    flex: '0 1 auto',
+                    minWidth: 0,
+                  }}
+                >
+                  → {r.target}
+                </span>
+              )}
+            </>
           )}
         </span>
       );

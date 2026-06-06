@@ -9,6 +9,7 @@ import { ICON, FS, TOKENS } from '../../theme';
 import {
   CancelSftpTransfer,
   GetPaneCwd,
+  GetPaneOSFamily,
   InstallOsc7Hook,
   PickDirectory,
   PickFiles,
@@ -74,6 +75,12 @@ const COLS: ColDef<ColKey>[] = [
 // unique per pane lifetime, so stale entries for closed panes are harmless.
 const paneCwdCache = new Map<string, string>();
 
+// "Follow terminal folder" is a per-pane choice. Like paneCwdCache, it's
+// keyed by paneId so the single reused SftpPanel instance restores each
+// pane's own toggle state when the active pane changes (rather than the
+// component-level state leaking across panes of the same session).
+const paneFollowCache = new Map<string, boolean>();
+
 export function SftpPanel({ paneId, paneState }: Props) {
   const [cwd, setCwd] = useState('');
   const [draftPath, setDraftPath] = useState('');
@@ -87,6 +94,10 @@ export function SftpPanel({ paneId, paneState }: Props) {
   // "Follow terminal folder" — when on, navigate the panel whenever the
   // shell emits OSC 7. Backend emits pane:cwd:{paneId} from the PTY stream.
   const [followTerm, setFollowTerm] = useState(false);
+  // Follow needs the OSC 7 hook, which is bash/zsh — unsupported on Windows
+  // remotes. Optimistic (true) until the probed family says "windows", so
+  // the toggle isn't briefly disabled while the probe lands.
+  const [followSupported, setFollowSupported] = useState(true);
 
   // showErr wraps setErr to drop user-triggered cancellations (the
   // transfer strip's "cancelled" badge is already the visible
@@ -262,6 +273,24 @@ export function SftpPanel({ paneId, paneState }: Props) {
     });
     return () => off();
   }, [paneId, loadDir]);
+
+  // Resolve whether Follow is supported for this pane (POSIX shell only).
+  // Query the probed family on mount/pane-swap, and also subscribe to the
+  // host-info event in case the probe lands after we mount.
+  useEffect(() => {
+    if (!paneId) return;
+    // Restore this pane's own follow choice (per-pane, not shared across
+    // panes of the same session).
+    setFollowTerm(paneFollowCache.get(paneId) ?? false);
+    setFollowSupported(true); // optimistic until proven Windows
+    void GetPaneOSFamily(paneId)
+      .then((fam) => setFollowSupported(fam !== 'windows'))
+      .catch(() => {});
+    const off = EventsOn(`pane:hostinfo:${paneId}`, (info: { family?: string }) => {
+      if (info?.family) setFollowSupported(info.family !== 'windows');
+    });
+    return () => off();
+  }, [paneId]);
 
   const goBack = () => {
     if (cursorRef.current <= 0) return;
@@ -951,16 +980,37 @@ export function SftpPanel({ paneId, paneState }: Props) {
                     onCancel={() => setRenaming(null)}
                   />
                 ) : (
-                  <span
-                    style={{
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      color: e.isDir ? TOKENS.dir : exec ? TOKENS.accent : 'inherit',
-                    }}
-                  >
-                    {e.name}
-                  </span>
+                  <>
+                    <span
+                      style={{
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        flex: '0 1 auto',
+                        minWidth: 0,
+                        color: e.isDir ? TOKENS.dir : exec ? TOKENS.accent : 'inherit',
+                      }}
+                    >
+                      {e.name}
+                    </span>
+                    {e.isSymlink && e.target && (
+                      // Inline link target so a symlink reads as one at a
+                      // glance (e.g. "X11 → ." reveals the self-link loop).
+                      <span
+                        style={{
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          flex: '0 1 auto',
+                          minWidth: 0,
+                          color: TOKENS.fgMute,
+                          fontSize: FS.sm,
+                        }}
+                      >
+                        → {e.target}
+                      </span>
+                    )}
+                  </>
                 )}
               </span>
             );
@@ -978,23 +1028,28 @@ export function SftpPanel({ paneId, paneState }: Props) {
 
       {/* Follow terminal folder toggle */}
       <FollowTermToggle
-        on={followTerm}
+        on={followTerm && followSupported}
+        disabled={!followSupported}
         onChange={(next) => {
           setFollowTerm(next);
+          if (paneId) paneFollowCache.set(paneId, next);
           if (!(next && paneId && paneState === 'Connected')) return;
-          // 1) If the shell has already been emitting OSC 7 (e.g.,
-          //    Ubuntu default bash with the vte PROMPT_COMMAND),
-          //    sync immediately from the cached value.
-          // 2) Always install our own OSC 7 hook so future prompt
-          //    redraws emit a cwd — covers shells whose default
-          //    config doesn't emit OSC 7. Idempotent on repeat
-          //    toggles (bash/zsh both gate on a name check).
           void GetPaneCwd(paneId)
             .then((p) => {
-              if (p && p !== cwd) void loadDir(p);
+              if (p) {
+                // The hook is already active (auto-installed at connect, or
+                // a prior toggle) and the shell is emitting OSC 7 — just
+                // jump to the current dir. Do NOT re-inject: that would type
+                // the hook command into whatever holds the prompt,
+                // corrupting a foregrounded full-screen app (vim, a REPL, …).
+                if (p !== cwd) void loadDir(p);
+                return;
+              }
+              // Nothing tracked yet — install the hook so future prompt
+              // redraws emit a cwd. (Backend no-ops this on Windows.)
+              void InstallOsc7Hook(paneId).catch(() => {});
             })
             .catch(() => {});
-          void InstallOsc7Hook(paneId).catch(() => {});
         }}
       />
 
@@ -1199,11 +1254,28 @@ export function SftpPanel({ paneId, paneState }: Props) {
   );
 }
 
-function FollowTermToggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+function FollowTermToggle({
+  on,
+  disabled,
+  onChange,
+}: {
+  on: boolean;
+  disabled?: boolean;
+  onChange: (v: boolean) => void;
+}) {
   return (
     <button
-      onClick={() => onChange(!on)}
-      title={on ? 'Click to stop following the terminal CWD' : 'Sync this view to the terminal CWD (requires OSC 7)'}
+      onClick={() => {
+        if (!disabled) onChange(!on);
+      }}
+      disabled={disabled}
+      title={
+        disabled
+          ? 'Follow terminal folder needs a POSIX shell (bash/zsh) — not available on Windows hosts'
+          : on
+            ? 'Click to stop following the terminal CWD'
+            : 'Sync this view to the terminal CWD (requires OSC 7)'
+      }
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -1211,15 +1283,16 @@ function FollowTermToggle({ on, onChange }: { on: boolean; onChange: (v: boolean
         padding: '7px 12px',
         border: 0,
         background: 'transparent',
-        color: on ? TOKENS.accent : TOKENS.fgDim,
-        cursor: 'pointer',
+        color: disabled ? TOKENS.fgMute : on ? TOKENS.accent : TOKENS.fgDim,
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.55 : 1,
         font: `500 ${FS.sm}px/1 ${TOKENS.font}`,
         borderTop: `1px solid ${TOKENS.border}`,
         flex: '0 0 auto',
         textAlign: 'left',
       }}
       onMouseEnter={(e) => {
-        if (!on) e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+        if (!on && !disabled) e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
       }}
       onMouseLeave={(e) => {
         e.currentTarget.style.background = 'transparent';

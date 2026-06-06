@@ -30,6 +30,11 @@ type Pane struct {
 	ID        string
 	SessionID string
 
+	// initialDir, when non-empty, is a working directory the shell cd's
+	// into once ready (workspace restore — see Manager.OpenInDir). Set
+	// before connect and read once by runStartupCmds; not mutated after.
+	initialDir string
+
 	appCtx context.Context // for emitting Wails events
 	ctx    context.Context // pane lifetime
 	cancel context.CancelFunc
@@ -254,7 +259,7 @@ func (p *Pane) connectSSHLike(sess profile.Session) error {
 	go p.keepaliveLoop()
 	go p.probeHostInfo(client)
 	p.maybeAskSavePassword(sess)
-	p.runStartupCmds(sess.StartupCmds)
+	p.runConnectInit(sess)
 	return nil
 }
 
@@ -296,7 +301,7 @@ func (p *Pane) connectLocalShell(sess profile.Session) error {
 	p.pty = local
 	p.transition(StateConnected, "")
 	go p.readLoop()
-	p.runStartupCmds(sess.StartupCmds)
+	p.runConnectInit(sess)
 	return nil
 }
 
@@ -416,7 +421,7 @@ func (p *Pane) connectWSL(sess profile.Session) error {
 	p.pty = local
 	p.transition(StateConnected, "")
 	go p.readLoop()
-	p.runStartupCmds(sess.StartupCmds)
+	p.runConnectInit(sess)
 	return nil
 }
 
@@ -655,20 +660,27 @@ func (p *Pane) ResolveHostKeyChange(accept bool) error {
 	return nil
 }
 
-// runStartupCmds writes the session's saved "run commands on connect"
-// snippet into the pty's stdin once the shell is ready. Per the
-// design (hopperterm-core.jsx:2702), this only applies to terminal
-// sessions — ssh / shell / wsl / awsec2 — so file-only transports
-// don't get called. Trailing newline ensures the last command fires.
+// runConnectInit performs post-connect shell setup on a single goroutine
+// so every PTY-stdin write stays serialized (no byte interleaving). Only
+// terminal sessions call it (ssh / shell / wsl / awsec2). In order, once
+// the shell is ready:
 //
-// Runs in a goroutine and waits 250ms so the remote shell has a
-// moment to print its rc-file output / motd before we inject text;
-// that keeps the displayed transcript clean.
-func (p *Pane) runStartupCmds(cmds string) {
-	cmds = strings.TrimSpace(cmds)
-	if cmds == "" {
-		return
-	}
+//  1. SSH/EC2 to a Linux/macOS remote: install the invisible OSC 7
+//     cwd-tracking hook (its echo is swallowed) so the shell emits its
+//     working directory on every prompt. This makes "Follow terminal
+//     folder" and workspace cwd capture/restore work without the user
+//     enabling anything, and is the reason GetPaneCwd is reliable at save
+//     time. Skipped for WSL / local shells (no Remote Files panel; don't
+//     touch the user's own prompt) and Windows remotes (the hook is
+//     bash/zsh) — see cwdHookApplies.
+//  2. cd into a restored workspace cwd (initialDir), if any.
+//  3. run the session's "run commands on connect" snippet.
+//
+// Waits 250ms first so the remote shell can print its rc-file output / motd
+// and settle at a clean prompt before we inject — injecting mid-line would
+// corrupt a half-typed command, which is why this can't be done lazily at
+// save time.
+func (p *Pane) runConnectInit(sess profile.Session) {
 	go func() {
 		select {
 		case <-time.After(250 * time.Millisecond):
@@ -678,19 +690,79 @@ func (p *Pane) runStartupCmds(cmds string) {
 		if p.pty == nil || p.pty.Stdin() == nil {
 			return
 		}
-		// Terminate every line with a carriage return (\r) — that's the
-		// byte a real Enter keypress sends (xterm.js emits \r, not \n).
-		// A bare \n is displayed in the line buffer but not accepted as
-		// "submit" by readline/zsh ZLE in raw mode, so a single-line
-		// snippet would print without running. Normalize CRLF/LF → CR
-		// and ensure a trailing CR so the final command fires.
-		payload := strings.ReplaceAll(cmds, "\r\n", "\n")
-		payload = strings.ReplaceAll(payload, "\n", "\r")
-		if !strings.HasSuffix(payload, "\r") {
-			payload += "\r"
+		if p.cwdHookApplies(sess) {
+			_ = p.installOsc7Hook("cwd tracking")
 		}
-		_, _ = p.pty.Stdin().Write([]byte(payload))
+		p.writeStartupCmds(sess.StartupCmds)
 	}()
+}
+
+// cwdHookApplies reports whether the OSC 7 cwd-tracking hook should be
+// installed for this pane. It's enabled ONLY for SSH/EC2 sessions to a
+// Linux or macOS remote — the case the Remote Files panel's "Follow
+// terminal folder" and workspace cwd capture/restore actually serve.
+// Deliberately excluded:
+//   - WSL and local shells: they have no Remote Files panel, and we avoid
+//     touching the user's own machine's shell prompt.
+//   - Windows remotes: the hook is bash/zsh.
+// For SSH/EC2 it consults the connect-time OS-family probe, waiting briefly
+// for it to land; an unresolved family (slow / failed probe) is treated as
+// NOT applicable so a misclassified host never receives bash garbage.
+func (p *Pane) cwdHookApplies(sess profile.Session) bool {
+	if sess.Type != profile.SessionSSH && sess.Type != profile.SessionAWSEC2 {
+		return false
+	}
+	for i := 0; i < 30; i++ { // ~1.5s for the probe to classify
+		switch p.cachedOSFamily() {
+		case "linux", "darwin":
+			return true
+		case "windows":
+			return false
+		}
+		select {
+		case <-time.After(50 * time.Millisecond):
+		case <-p.ctx.Done():
+			return false
+		}
+	}
+	return false
+}
+
+// writeStartupCmds writes the session's "run commands on connect" snippet
+// into the pty's stdin, followed by a `cd` into any restored workspace cwd.
+// Synchronous; callers (runConnectInit) own the goroutine + readiness wait.
+func (p *Pane) writeStartupCmds(cmds string) {
+	// Workspace restore: cd into the saved cwd AFTER the session's own
+	// startup snippet, so the restored directory is where the pane finally
+	// lands even if a startup command cd'd elsewhere ("reopen where I left
+	// off" wins over the session default).
+	if p.initialDir != "" {
+		cd := "cd " + transport.ShQuote(p.initialDir)
+		if strings.TrimSpace(cmds) == "" {
+			cmds = cd
+		} else {
+			cmds = strings.TrimRight(cmds, "\r\n") + "\n" + cd
+		}
+	}
+	cmds = strings.TrimSpace(cmds)
+	if cmds == "" {
+		return
+	}
+	if p.pty == nil || p.pty.Stdin() == nil {
+		return
+	}
+	// Terminate every line with a carriage return (\r) — that's the byte a
+	// real Enter keypress sends (xterm.js emits \r, not \n). A bare \n is
+	// displayed in the line buffer but not accepted as "submit" by
+	// readline/zsh ZLE in raw mode, so a single-line snippet would print
+	// without running. Normalize CRLF/LF → CR and ensure a trailing CR so
+	// the final command fires.
+	payload := strings.ReplaceAll(cmds, "\r\n", "\n")
+	payload = strings.ReplaceAll(payload, "\n", "\r")
+	if !strings.HasSuffix(payload, "\r") {
+		payload += "\r"
+	}
+	_, _ = p.pty.Stdin().Write([]byte(payload))
 }
 
 // maybeAskSavePassword emits pane:asksavepassword if the user typed a
@@ -929,8 +1001,24 @@ func (p *Pane) cacheOSFamily(fam string) {
 // still works on most POSIX shells; if no marker arrives within 3 s
 // the suppression filter releases its buffer anyway.
 func (p *Pane) InstallOsc7Hook() error {
+	return p.installOsc7Hook("Follow terminal folder")
+}
+
+// installOsc7Hook is the implementation; reason is recorded in the
+// connection-log audit line so each caller's context is clear (the
+// "Follow terminal folder" toggle vs. automatic connect-time cwd tracking).
+func (p *Pane) installOsc7Hook(reason string) error {
 	if p.pty == nil || p.pty.Stdin() == nil {
 		return errors.New("pane: not connected")
+	}
+	// The hook is bash/zsh — never inject it into a Windows shell, where
+	// cmd.exe / PowerShell would echo errors for the bash syntax and the
+	// swallow marker would never arrive (releasing a buffer of garbage).
+	// runConnectInit already gates on shellIsPOSIX; this guards the direct
+	// caller too (the "Follow terminal folder" toggle). cwd tracking is
+	// POSIX-only. An unprobed family ("") optimistically proceeds.
+	if p.cachedOSFamily() == "windows" {
+		return errors.New("pane: OSC 7 cwd tracking is not supported on Windows shells")
 	}
 	// Arm the readLoop's swallow filter BEFORE writing so the
 	// inject's echo never makes it past EmitPaneOutput.
@@ -946,7 +1034,7 @@ func (p *Pane) InstallOsc7Hook() error {
 		// user's terminal, so leave a one-line trace in the
 		// connection log identifying what we did and why.
 		events.EmitConnectionLog(p.appCtx, p.ID, events.LogDim, time.Now().UnixMilli(),
-			"Installed OSC 7 hook in shell session (Follow terminal folder)")
+			"Installed OSC 7 hook in shell session ("+reason+")")
 	}
 	return err
 }
@@ -954,9 +1042,15 @@ func (p *Pane) InstallOsc7Hook() error {
 // osc7Hook — sent verbatim to the PTY. Leading space + trailing
 // newline are intentional. Single-quoted printf format keeps `\033`
 // and `\\` literal until printf interprets them as ESC and `\`. The
-// trailing `printf '\033]7339;hop:done\007'` is the marker the
-// readLoop watches for to stop swallowing output.
-const osc7Hook = ` _hop_osc7(){ printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-${HOST:-$(hostname 2>/dev/null)}}" "$PWD"; }; if [ -n "$BASH_VERSION" ]; then case ";${PROMPT_COMMAND};" in *";_hop_osc7;"*|*";_hop_osc7"*) :;; *) PROMPT_COMMAND="_hop_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND}";; esac; elif [ -n "$ZSH_VERSION" ]; then case " ${precmd_functions[*]} " in *" _hop_osc7 "*) :;; *) precmd_functions+=(_hop_osc7);; esac; fi; _hop_osc7; printf '\033]7339;hop:done\007'
+// trailing printf emits the `\033]7339;hop:done\007` marker the
+// readLoop watches for to stop swallowing output, then `\r\033[2K`
+// (carriage-return + erase-line). That erase is the tail forwarded
+// AFTER the marker: the shell drew a prompt before we injected, and
+// the inject's echo+newline are swallowed, so without it the shell's
+// post-command prompt would render on the same line as the stale one
+// (a visible "prompt$ prompt$" doubling). Erasing the line lets the
+// redrawn prompt land cleanly, so the inject leaves no visible trace.
+const osc7Hook = ` _hop_osc7(){ printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-${HOST:-$(hostname 2>/dev/null)}}" "$PWD"; }; if [ -n "$BASH_VERSION" ]; then case ";${PROMPT_COMMAND};" in *";_hop_osc7;"*|*";_hop_osc7"*) :;; *) PROMPT_COMMAND="_hop_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND}";; esac; elif [ -n "$ZSH_VERSION" ]; then case " ${precmd_functions[*]} " in *" _hop_osc7 "*) :;; *) precmd_functions+=(_hop_osc7);; esac; fi; _hop_osc7; printf '\033]7339;hop:done\007\r\033[2K'
 `
 
 // osc7EndMarker — private OSC sequence terminals don't recognise.

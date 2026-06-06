@@ -43,12 +43,20 @@ func NewManager(appCtx context.Context) *Manager {
 // so the frontend doesn't double-report the error as a banner — the
 // error is already visible in the pane's own output stream.
 func (m *Manager) Open(paneID string, sess profile.Session) error {
+	return m.OpenInDir(paneID, sess, "")
+}
+
+// OpenInDir is Open with an initial working directory the shell cd's into
+// once ready — used by workspace restore to land a pane back in its saved
+// cwd. dir == "" behaves exactly like Open.
+func (m *Manager) OpenInDir(paneID string, sess profile.Session, dir string) error {
 	m.mu.Lock()
 	if _, exists := m.panes[paneID]; exists {
 		m.mu.Unlock()
 		return fmt.Errorf("pane: %s already open", paneID)
 	}
 	p := newPane(m.appCtx, paneID, sess)
+	p.initialDir = dir
 	m.panes[paneID] = p
 	m.mu.Unlock()
 
@@ -154,6 +162,16 @@ func (m *Manager) LastCwd(paneID string) (string, error) {
 		return "", errors.New("pane: not found")
 	}
 	return p.LastCwd(), nil
+}
+
+// OSFamily returns the pane's probed remote OS family ("linux"/"darwin"/
+// "windows"), or "" if not an SSH pane or the probe hasn't landed yet.
+func (m *Manager) OSFamily(paneID string) (string, error) {
+	p, ok := m.get(paneID)
+	if !ok {
+		return "", errors.New("pane: not found")
+	}
+	return p.cachedOSFamily(), nil
 }
 
 // InstallOsc7Hook injects an OSC 7 emitter into the pane's shell so

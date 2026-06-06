@@ -57,23 +57,92 @@ func TestSendInput_ForwardsWhenNotAuthing(t *testing.T) {
 	}
 }
 
-func TestRunStartupCmds(t *testing.T) {
-	p, f := paneWithPTY("")
-	p.runStartupCmds("uptime")
+func TestWriteStartupCmds(t *testing.T) {
 	// Lines are terminated with CR (\r) — the byte a real Enter sends.
-	waitFor(t, func() bool { return strings.Contains(f.written(), "uptime\r") })
+	p, f := paneWithPTY("")
+	p.writeStartupCmds("uptime")
+	if got := f.written(); got != "uptime\r" {
+		t.Errorf("startup cmds = %q, want %q", got, "uptime\r")
+	}
 
 	// Multi-line snippet: each line gets a CR; CRLF/LF normalized to CR.
 	p3, f3 := paneWithPTY("")
-	p3.runStartupCmds("cd /tmp\r\nls\nuptime")
-	waitFor(t, func() bool { return f3.written() == "cd /tmp\rls\ruptime\r" })
+	p3.writeStartupCmds("cd /tmp\r\nls\nuptime")
+	if got := f3.written(); got != "cd /tmp\rls\ruptime\r" {
+		t.Errorf("multi-line = %q, want %q", got, "cd /tmp\rls\ruptime\r")
+	}
 
 	// Empty / whitespace commands are a no-op.
 	p2, f2 := paneWithPTY("")
-	p2.runStartupCmds("   ")
-	time.Sleep(20 * time.Millisecond)
+	p2.writeStartupCmds("   ")
 	if f2.written() != "" {
 		t.Errorf("blank startup cmds should write nothing, got %q", f2.written())
+	}
+}
+
+func TestWriteStartupCmds_InitialDir(t *testing.T) {
+	// Workspace restore: initialDir appends a single-quoted `cd` AFTER the
+	// session's own snippet (so the restored dir wins), each line CR-ended.
+	p, f := paneWithPTY("")
+	p.initialDir = "/var/www/my app"
+	p.writeStartupCmds("ls")
+	if got := f.written(); got != "ls\rcd '/var/www/my app'\r" {
+		t.Errorf("with initialDir = %q", got)
+	}
+
+	// No startup snippet: just the cd.
+	p2, f2 := paneWithPTY("")
+	p2.initialDir = "/srv"
+	p2.writeStartupCmds("")
+	if got := f2.written(); got != "cd '/srv'\r" {
+		t.Errorf("cd-only = %q", got)
+	}
+
+	// A single quote in the path is escaped so it can't break the argument.
+	p3, f3 := paneWithPTY("")
+	p3.initialDir = "/a'b"
+	p3.writeStartupCmds("")
+	if got, want := f3.written(), `cd '/a'\''b'`+"\r"; got != want {
+		t.Errorf("quote-escape = %q, want %q", got, want)
+	}
+}
+
+func TestCwdHookApplies(t *testing.T) {
+	// SSH/EC2 to a Linux or macOS remote: enabled.
+	pLin, _ := paneWithPTY("")
+	pLin.cacheOSFamily("linux")
+	if !pLin.cwdHookApplies(profile.Session{Type: profile.SessionSSH}) {
+		t.Error("SSH to a Linux remote should get the hook")
+	}
+	pMac, _ := paneWithPTY("")
+	pMac.cacheOSFamily("darwin")
+	if !pMac.cwdHookApplies(profile.Session{Type: profile.SessionAWSEC2}) {
+		t.Error("EC2 to a macOS remote should get the hook")
+	}
+	// SSH to a Windows remote: excluded (hook is bash/zsh).
+	pWin, _ := paneWithPTY("")
+	pWin.cacheOSFamily("windows")
+	if pWin.cwdHookApplies(profile.Session{Type: profile.SessionSSH}) {
+		t.Error("SSH to a Windows remote should not get the hook")
+	}
+	// WSL and local shells are excluded regardless (no Remote Files panel;
+	// don't touch the user's own prompt). cacheOSFamily is irrelevant here.
+	pWSL, _ := paneWithPTY("")
+	pWSL.cacheOSFamily("linux")
+	if pWSL.cwdHookApplies(profile.Session{Type: profile.SessionWSL}) {
+		t.Error("WSL should not get the hook")
+	}
+	pLocal, _ := paneWithPTY("")
+	if pLocal.cwdHookApplies(profile.Session{Type: profile.SessionShell}) {
+		t.Error("local shell should not get the hook")
+	}
+	// An unresolved family on SSH is treated as not-applicable (no bash
+	// garbage on a misclassified host). Cancel the ctx so the probe-wait
+	// exits immediately instead of polling for ~1.5s.
+	pUnknown, _ := paneWithPTY("")
+	pUnknown.cancel()
+	if pUnknown.cwdHookApplies(profile.Session{Type: profile.SessionAWSEC2}) {
+		t.Error("unresolved family should not get the hook")
 	}
 }
 
@@ -96,6 +165,17 @@ func TestInstallOsc7Hook(t *testing.T) {
 	p2 := newPane(context.Background(), "x", profile.Session{})
 	if err := p2.InstallOsc7Hook(); err == nil {
 		t.Error("InstallOsc7Hook without a pty should error")
+	}
+
+	// Windows remote → refused (the hook is bash/zsh; injecting it into
+	// cmd/PowerShell would print garbage), and nothing is written.
+	pWin, fWin := paneWithPTY("")
+	pWin.cacheOSFamily("windows")
+	if err := pWin.InstallOsc7Hook(); err == nil {
+		t.Error("InstallOsc7Hook should refuse a Windows shell")
+	}
+	if fWin.written() != "" {
+		t.Errorf("nothing should be written to a Windows shell, got %q", fWin.written())
 	}
 }
 

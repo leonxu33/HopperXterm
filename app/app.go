@@ -139,6 +139,17 @@ func (a *App) ReorderGroup(id, beforeGroupID string) error {
 // output stream over Wails events (pane:state:{paneId},
 // pane:output:{paneId}, connection:log:{paneId}).
 func (a *App) OpenPane(paneID, sessionID string) error {
+	return a.openPaneIn(paneID, sessionID, "")
+}
+
+// OpenPaneInDir is OpenPane with an initial working directory the shell
+// cd's into once ready. Used by workspace restore to reopen each pane in
+// its saved cwd; dir == "" behaves exactly like OpenPane.
+func (a *App) OpenPaneInDir(paneID, sessionID, dir string) error {
+	return a.openPaneIn(paneID, sessionID, dir)
+}
+
+func (a *App) openPaneIn(paneID, sessionID, dir string) error {
 	if paneID == "" || sessionID == "" {
 		return fmt.Errorf("OpenPane: paneId and sessionId required")
 	}
@@ -153,7 +164,7 @@ func (a *App) OpenPane(paneID, sessionID string) error {
 	if sess == nil {
 		return fmt.Errorf("OpenPane: session %s not found", sessionID)
 	}
-	return a.panes.Open(paneID, *sess)
+	return a.panes.OpenInDir(paneID, *sess, dir)
 }
 
 // ClosePane terminates the pane's SSH session and cleans up its goroutines.
@@ -247,6 +258,14 @@ func (a *App) SftpCwd(paneID string) (string, error) {
 // toggle-on without waiting for the next prompt redraw.
 func (a *App) GetPaneCwd(paneID string) (string, error) {
 	return a.panes.LastCwd(paneID)
+}
+
+// GetPaneOSFamily returns the pane's probed remote OS family
+// ("linux"/"darwin"/"windows"), or "" if unknown / not yet probed.
+// The Remote Files panel uses it to disable "Follow terminal folder"
+// on Windows shells, where the OSC 7 hook (bash/zsh) doesn't apply.
+func (a *App) GetPaneOSFamily(paneID string) (string, error) {
+	return a.panes.OSFamily(paneID)
 }
 
 // InstallOsc7Hook writes a bash/zsh-aware OSC 7 emitter into the

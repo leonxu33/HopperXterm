@@ -23,9 +23,11 @@ import {
   MoveSession,
   ReorderGroup,
   OpenPane,
+  OpenPaneInDir,
   ClosePane,
   ReleaseAllPanes,
   SendInput,
+  GetPaneCwd,
   ListWorkspaces,
   SaveWorkspace,
   DeleteWorkspace,
@@ -1129,19 +1131,46 @@ function App() {
     }))
     .filter((t) => t.paneCount > 0);
 
-  const serializeWorkspace = (name: string, tabsToSave: typeof tabs): WorkspaceSnapshot => {
+  // cwds maps a backend pane id → the shell's current working directory
+  // (OSC 7-tracked), so a restored workspace cd's each pane back. Panes
+  // that never emitted OSC 7 are simply absent (left cwd-less on restore).
+  const serializeWorkspace = (
+    name: string,
+    tabsToSave: typeof tabs,
+    cwds?: Map<string, string>,
+  ): WorkspaceSnapshot => {
+    const cwdFor = cwds ? (id: string) => cwds.get(id) : undefined;
     const outTabs: WorkspaceTab[] = [];
     for (const t of tabsToSave) {
       // Drop non-shell (SFTP/FTP/S3) leaves, then strip backend pane ids.
       const shellLayout = filterLeaves(t.layout, (leaf) => isShellSession(leaf.sessionId));
-      if (shellLayout) outTabs.push({ label: t.label, layout: toWsNode(shellLayout) });
+      if (shellLayout) outTabs.push({ label: t.label, layout: toWsNode(shellLayout, cwdFor) });
     }
     return { name, tabs: outTabs, updatedAt: Date.now() };
   };
 
   const onSaveWorkspace = async (name: string, tabIds: string[]) => {
     const wanted = new Set(tabIds);
-    const snapshot = serializeWorkspace(name, tabs.filter((t) => wanted.has(t.id)));
+    const tabsToSave = tabs.filter((t) => wanted.has(t.id));
+    // Snapshot each shell pane's live cwd before serializing. GetPaneCwd
+    // returns "" (or errors) when the shell hasn't emitted OSC 7; those
+    // panes are skipped so restore just opens them in their default dir.
+    const cwds = new Map<string, string>();
+    await Promise.all(
+      tabsToSave.flatMap((t) =>
+        paneLeaves(t.layout)
+          .filter((l) => isShellSession(l.sessionId))
+          .map(async (l) => {
+            try {
+              const c = await GetPaneCwd(l.id);
+              if (c) cwds.set(l.id, c);
+            } catch {
+              /* pane closed or never reported a cwd — skip */
+            }
+          }),
+      ),
+    );
+    const snapshot = serializeWorkspace(name, tabsToSave, cwds);
     if (snapshot.tabs.length === 0) {
       setErr('Nothing to save — workspaces only store shell sessions (SFTP/FTP/S3 panes are excluded).');
       return;
@@ -1164,12 +1193,15 @@ function App() {
       pushRecent({ kind: 'workspace', name });
       const newTabs: Tab[] = [];
       const newActiveByTab: Record<string, string> = {};
+      // Restore-cwd per fresh pane id, accumulated across all tabs (pane
+      // ids are globally unique), consumed by the OpenPaneInDir loop below.
+      const restoreCwd = new Map<string, string>();
       for (let i = 0; i < ws.tabs.length; i++) {
         const wt = ws.tabs[i];
         const tabId = newId('tab');
         // Accepts the new tree shape or the legacy column array; both yield a
-        // live layout with fresh pane ids.
-        const layout = loadWsLayout(wt.layout, () => newId('pane'));
+        // live layout with fresh pane ids. onLeaf collects any saved cwd.
+        const layout = loadWsLayout(wt.layout, () => newId('pane'), (id, cwd) => restoreCwd.set(id, cwd));
         if (!layout) continue;
         const firstCell = paneLeaves(layout)[0] ?? null;
         const sourceSession = firstCell ? snap.sessions.find((s) => s.id === firstCell.sessionId) : null;
@@ -1192,7 +1224,9 @@ function App() {
       if (newTabs[0]) setActiveTabId(newTabs[0].id);
       for (const tab of newTabs) {
         for (const leaf of paneLeaves(tab.layout)) {
-          OpenPane(leaf.id, leaf.sessionId).catch((e) =>
+          // Reopen in the saved cwd when we have one; OpenPaneInDir with an
+          // empty dir is identical to OpenPane.
+          OpenPaneInDir(leaf.id, leaf.sessionId, restoreCwd.get(leaf.id) ?? '').catch((e) =>
             setErr(`OpenPane ${leaf.sessionId}: ${String(e)}`),
           );
         }

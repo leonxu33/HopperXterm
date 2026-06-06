@@ -18,8 +18,8 @@ func TestShQuote(t *testing.T) {
 		{"a'b'c", `'a'\''b'\''c'`},
 	}
 	for _, c := range cases {
-		if got := shQuote(c.in); got != c.want {
-			t.Errorf("shQuote(%q) = %q, want %q", c.in, got, c.want)
+		if got := ShQuote(c.in); got != c.want {
+			t.Errorf("ShQuote(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

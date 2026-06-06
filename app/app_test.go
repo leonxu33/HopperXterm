@@ -190,6 +190,9 @@ func TestSftpAndResourcePassthrough_UnknownPane(t *testing.T) {
 	if _, err := a.GetPaneCwd("ghost"); err == nil {
 		t.Error("GetPaneCwd")
 	}
+	if _, err := a.GetPaneOSFamily("ghost"); err == nil {
+		t.Error("GetPaneOSFamily")
+	}
 	if err := a.InstallOsc7Hook("ghost"); err == nil {
 		t.Error("InstallOsc7Hook")
 	}

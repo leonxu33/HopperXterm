@@ -78,11 +78,11 @@ func (s *SCP) run(cmd string) (string, error) {
 	return out.String(), nil
 }
 
-// shQuote single-quotes a path so spaces and shell metacharacters in file
+// ShQuote single-quotes a path so spaces and shell metacharacters in file
 // names can't break out of the argument. The only character that can't live
 // inside single quotes is a single quote itself, handled by the classic
 // '\'' escape.
-func shQuote(s string) string {
+func ShQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
@@ -104,7 +104,7 @@ func (s *SCP) List(dir string) ([]Entry, error) {
 	if dir == "" {
 		dir = "."
 	}
-	out, err := s.run("ls -la -- " + shQuote(dir))
+	out, err := s.run("ls -la -- " + ShQuote(dir))
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +113,7 @@ func (s *SCP) List(dir string) ([]Entry, error) {
 
 // Stat returns metadata for a single path via `ls -lad`.
 func (s *SCP) Stat(p string) (Entry, error) {
-	out, err := s.run("ls -lad -- " + shQuote(p))
+	out, err := s.run("ls -lad -- " + ShQuote(p))
 	if err != nil {
 		return Entry{}, err
 	}
@@ -134,7 +134,7 @@ func (s *SCP) Mkdir(p string, parents bool) error {
 	if parents {
 		cmd = "mkdir -p -- "
 	}
-	_, err := s.run(cmd + shQuote(p))
+	_, err := s.run(cmd + ShQuote(p))
 	return err
 }
 
@@ -143,22 +143,22 @@ func (s *SCP) Mkdir(p string, parents bool) error {
 func (s *SCP) Remove(p string) error {
 	e, err := s.Stat(p)
 	if err == nil && e.IsDir && !e.IsSymlink {
-		_, rerr := s.run("rmdir -- " + shQuote(p))
+		_, rerr := s.run("rmdir -- " + ShQuote(p))
 		return rerr
 	}
-	_, rerr := s.run("rm -- " + shQuote(p))
+	_, rerr := s.run("rm -- " + ShQuote(p))
 	return rerr
 }
 
 // RemoveAll deletes p and everything under it.
 func (s *SCP) RemoveAll(p string) error {
-	_, err := s.run("rm -rf -- " + shQuote(p))
+	_, err := s.run("rm -rf -- " + ShQuote(p))
 	return err
 }
 
 // Rename moves src to dst.
 func (s *SCP) Rename(src, dst string) error {
-	_, err := s.run("mv -- " + shQuote(src) + " " + shQuote(dst))
+	_, err := s.run("mv -- " + ShQuote(src) + " " + ShQuote(dst))
 	return err
 }
 
@@ -166,7 +166,7 @@ func (s *SCP) Rename(src, dst string) error {
 // is the POSIX shell idiom (the `:` no-op produces no output, `>` truncates
 // or creates), matching SFTP.Create's overwrite semantics.
 func (s *SCP) Create(p string) error {
-	_, err := s.run(": > " + shQuote(p))
+	_, err := s.run(": > " + ShQuote(p))
 	return err
 }
 
@@ -239,7 +239,7 @@ func (s *SCP) Download(remotePath, localPath string, progress ProgressFunc, canc
 	if err != nil {
 		return 0, err
 	}
-	if err := sess.Start("scp -f -- " + shQuote(remotePath)); err != nil {
+	if err := sess.Start("scp -f -- " + ShQuote(remotePath)); err != nil {
 		return 0, err
 	}
 	stop := watchCancel(cancel, sess)
@@ -331,7 +331,7 @@ func (s *SCP) Upload(localPath, remotePath string, progress ProgressFunc, cancel
 	if err != nil {
 		return 0, err
 	}
-	if err := sess.Start("scp -t -- " + shQuote(remotePath)); err != nil {
+	if err := sess.Start("scp -t -- " + ShQuote(remotePath)); err != nil {
 		return 0, err
 	}
 	stop := watchCancel(cancel, sess)
