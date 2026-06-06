@@ -5,7 +5,10 @@
 # config dir) and wraps it in an NSIS installer. The installer bundles the
 # Edge WebView2 bootstrapper, so target machines need nothing pre-installed.
 #
-# Output:  app\build\bin\win\HopperXterm-amd64-installer.exe   (gitignored)
+# Output:  app\build\bin\win\HopperXterm-<version>-windows-amd64.exe   (gitignored)
+#          (<version> = info.productVersion from app\wails.json; the script
+#           renames Wails' default HopperXterm-amd64-installer.exe to this
+#           scheme so Windows + macOS release assets match.)
 # Version: edit "info.productVersion" in app\wails.json before a release.
 #
 #   .\scripts\build_win_installer.ps1            # build installer
@@ -85,7 +88,9 @@ Set-Location $appDir
 foreach ($d in @($binDir, $winDir)) {
     $staleExe = Join-Path $d 'HopperXterm.exe'
     if (Test-Path $staleExe) { Remove-Item $staleExe -Force -ErrorAction SilentlyContinue }
-    Get-ChildItem -Path $d -Filter '*-installer.exe' -ErrorAction SilentlyContinue |
+    # Both Wails' default name (*-installer.exe) and our renamed scheme
+    # (HopperXterm-*-windows-amd64.exe) so a stale build can't linger.
+    Get-ChildItem -Path (Join-Path $d '*') -Include '*-installer.exe', 'HopperXterm-*-windows-amd64.exe' -File -ErrorAction SilentlyContinue |
         Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
@@ -115,8 +120,20 @@ if (Test-Path $builtExe) { Move-Item $builtExe $winDir -Force }
 Get-ChildItem -Path $binDir -Filter '*-installer.exe' -ErrorAction SilentlyContinue |
     Move-Item -Destination $winDir -Force
 
+# Rename Wails' default HopperXterm-amd64-installer.exe to the versioned,
+# OS-tagged scheme (HopperXterm-<version>-windows-amd64.exe) so the Windows
+# and macOS release assets share one naming convention.
+$version = (Select-String -Path (Join-Path $appDir 'wails.json') -Pattern '"productVersion"\s*:\s*"([^"]+)"' |
+    Select-Object -First 1).Matches.Groups[1].Value
+$default = Get-ChildItem -Path $winDir -Filter '*-installer.exe' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($default -and $version) {
+    $finalName = "HopperXterm-$version-windows-amd64.exe"
+    Move-Item $default.FullName (Join-Path $winDir $finalName) -Force
+}
+
 # --- Report --------------------------------------------------------------
-$installer = Get-ChildItem -Path $winDir -Filter '*-installer.exe' -ErrorAction SilentlyContinue |
+$installer = Get-ChildItem -Path (Join-Path $winDir '*') -Include '*-installer.exe', 'HopperXterm-*-windows-amd64.exe' -File -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
 Write-Host ""

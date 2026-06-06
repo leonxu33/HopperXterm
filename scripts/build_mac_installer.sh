@@ -5,7 +5,7 @@
 # drag-to-Applications disk image with hdiutil — no third-party packaging
 # tools needed.
 #
-# Output: app/build/bin/mac/HopperXterm-<version>-universal.dmg
+# Output: app/build/bin/mac/HopperXterm-<version>-macos-universal.dmg
 #   (<version> = info.productVersion from app/wails.json)
 #
 # Usage:  scripts/build_mac_installer.sh [--skip-build]
@@ -27,7 +27,7 @@ fi
 [ -d "$APP_BUNDLE" ] || { echo "ERROR: $APP_BUNDLE missing — build first" >&2; exit 1; }
 
 VERSION="$(sed -n 's/.*"productVersion": *"\([^"]*\)".*/\1/p' "$APP_DIR/wails.json")"
-DMG="$APP_DIR/build/bin/mac/HopperXterm-${VERSION:-0.0.0}-universal.dmg"
+DMG="$APP_DIR/build/bin/mac/HopperXterm-${VERSION:-0.0.0}-macos-universal.dmg"
 
 # Stage: app bundle + /Applications symlink = the standard drag-install layout.
 STAGE="$(mktemp -d /tmp/hopperxterm-dmg.XXXXXX)"
