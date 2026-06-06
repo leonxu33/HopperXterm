@@ -30,7 +30,7 @@ import { EventsOn, OnFileDrop, OnFileDropOff } from '../../../wailsjs/runtime/ru
 import { IconBtn, ContextMenu } from './primitives';
 import type { ContextMenuItem } from './primitives';
 import { runWithConcurrency } from '../../lib/concurrency';
-import { type Entry, sortRows, formatSize, formatDate, withParentRow, isExec } from '../../lib/fileBrowser';
+import { type Entry, sortRows, formatSize, formatDate, formatMode, withParentRow, isExec } from '../../lib/fileBrowser';
 import { FileTable, RenameInput, type ColDef } from './FileTable';
 import {
   ConfirmDialog,
@@ -61,11 +61,14 @@ type Props = {
   paneState: 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected' | null;
 };
 
-type ColKey = 'name' | 'size' | 'modTimeMs';
+type ColKey = 'name' | 'size' | 'modTimeMs' | 'owner' | 'group' | 'access';
 const COLS: ColDef<ColKey>[] = [
   { k: 'name', label: 'Name', defaultWidth: 170, minWidth: 80, align: 'left' },
   { k: 'size', label: 'Size', defaultWidth: 70, minWidth: 50, align: 'right' },
   { k: 'modTimeMs', label: 'Modified', defaultWidth: 80, minWidth: 60, align: 'right' },
+  { k: 'owner', label: 'Owner', defaultWidth: 72, minWidth: 50, align: 'left' },
+  { k: 'group', label: 'Group', defaultWidth: 72, minWidth: 50, align: 'left' },
+  { k: 'access', label: 'Access', defaultWidth: 96, minWidth: 80, align: 'left' },
 ];
 
 // Last-browsed directory per pane, keyed by paneId. The right panel reuses a
@@ -1020,6 +1023,14 @@ export function SftpPanel({ paneId, paneState }: Props) {
           );
           if (k === 'size') return meta(e.isDir ? '—' : formatSize(e.size));
           if (k === 'modTimeMs') return meta(formatDate(e.modTimeMs));
+          if (k === 'owner') return meta(e.owner || '-');
+          if (k === 'group') return meta(e.group || '-');
+          if (k === 'access')
+            return (
+              <span style={{ fontSize: FS.sm, color: TOKENS.fgDim, fontFamily: TOKENS.mono }}>
+                {formatMode(e.mode, e.isDir, !!e.isSymlink) || '-'}
+              </span>
+            );
           return null;
         }}
       />
@@ -1323,7 +1334,6 @@ function FollowTermToggle({
         )}
       </span>
       <span style={{ flex: 1 }}>Follow terminal folder</span>
-      <span style={{ font: `${FS.xs}px/1 ${TOKENS.mono}`, color: TOKENS.fgMute }}>OSC 7</span>
     </button>
   );
 }

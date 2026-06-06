@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -54,6 +55,15 @@ type SFTP struct {
 	Client     *ssh.Client
 	c          *sftp.Client
 	ownsClient bool
+
+	// id→name maps for the Owner/Group columns, populated once per
+	// connection (best-effort) by ensureIDMaps. Keyed by the decimal id
+	// string (matching what entryFromInfo formats); a missing id falls back
+	// to the number. sync.Once gives one load even on failure (no retry
+	// loops) and publishes the maps so applyNames reads them lock-free.
+	idOnce     sync.Once
+	userByUID  map[string]string
+	groupByGID map[string]string
 }
 
 // OpenSFTP starts the SFTP subsystem on the given SSH client. The client
@@ -122,11 +132,12 @@ type Entry struct {
 	Mode      uint32 `json:"mode"`
 	ModTimeMs int64  `json:"modTimeMs"`
 	Target    string `json:"target,omitempty"` // if symlink, the link target
-	// Owner / Group are best-effort. For SFTP we surface the UID/GID
-	// the server reported as strings ("1000" / "1000"); the design
-	// renders them inline so the column has something useful. For
-	// local listings on Unix we resolve names via os/user (with the
-	// numeric id as fallback). Windows leaves them empty.
+	// Owner / Group are best-effort. For SFTP the server reports numeric
+	// UID/GID; we resolve them to names from the remote /etc/passwd and
+	// /etc/group (read once per connection), falling back to the number
+	// when a name isn't found (network/LDAP users, chrooted servers,
+	// Windows remotes). For local listings on Unix we resolve names via
+	// os/user (numeric fallback). Windows local leaves them empty.
 	Owner string `json:"owner,omitempty"`
 	Group string `json:"group,omitempty"`
 }
@@ -142,10 +153,12 @@ func (s *SFTP) List(dir string) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.ensureIDMaps() // one-time, best-effort uid/gid → name resolution
 	out := make([]Entry, len(infos))
 	var links []int // indices of symlink entries to resolve
 	for i, fi := range infos {
 		out[i] = entryFromInfo(fi)
+		s.applyNames(&out[i])
 		if fi.Mode()&os.ModeSymlink != 0 {
 			out[i].IsSymlink = true
 			links = append(links, i)
@@ -203,7 +216,10 @@ func (s *SFTP) Stat(p string) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	return entryFromInfo(fi), nil
+	s.ensureIDMaps()
+	e := entryFromInfo(fi)
+	s.applyNames(&e)
+	return e, nil
 }
 
 // Mkdir creates a directory. parents=true acts like mkdir -p.
@@ -548,15 +564,101 @@ func entryFromInfo(fi os.FileInfo) Entry {
 		Mode:      uint32(fi.Mode().Perm()),
 		ModTimeMs: fi.ModTime().UnixMilli(),
 	}
-	// pkg/sftp exposes the protocol-level FileStat via Sys(); it
-	// carries UID/GID as uint32. We surface them as decimal strings —
-	// resolving to names would require a remote `getent passwd` lookup
-	// and isn't worth the round-trip.
+	// pkg/sftp exposes the protocol-level FileStat via Sys(); it carries
+	// UID/GID as uint32. We surface them as decimal strings here; List /
+	// Stat then resolve them to names via the cached id maps (applyNames).
 	if st, ok := fi.Sys().(*sftp.FileStat); ok {
 		e.Owner = strconv.FormatUint(uint64(st.UID), 10)
 		e.Group = strconv.FormatUint(uint64(st.GID), 10)
 	}
 	return e
+}
+
+// ensureIDMaps lazily reads the remote /etc/passwd and /etc/group (over the
+// SFTP client — no exec channel) and caches uid/gid→name maps. Best-effort:
+// any read/parse failure leaves the maps empty (numeric fallback). Loaded at
+// most once per connection, even on failure.
+func (s *SFTP) ensureIDMaps() {
+	s.idOnce.Do(func() {
+		// Prefer an exec query: getent covers NSS (local + LDAP/SSSD) on
+		// Linux, and the `|| dscl` arm covers macOS Open Directory — regular
+		// macOS accounts (uid 501+) live there, NOT in /etc/passwd, so
+		// file-reading alone leaves them numeric. dscl output is reshaped to
+		// "name:x:id" so the one parser handles both. For servers that
+		// disable exec (ForceCommand internal-sftp), fall back to reading the
+		// files directly over SFTP.
+		load := func(query, file string) map[string]string {
+			out := ""
+			if s.Client != nil {
+				out, _ = runWithTimeout(s.Client, query, 3*time.Second)
+			}
+			if strings.TrimSpace(out) == "" {
+				out = s.readRemoteText(file)
+			}
+			return parseIDMap(out)
+		}
+		s.userByUID = load(usersIDQuery, "/etc/passwd")
+		s.groupByGID = load(groupsIDQuery, "/etc/group")
+	})
+}
+
+// id-dump commands. `getent` (Linux/NSS) is tried first; if it's absent
+// (macOS) the shell falls through to `dscl`, whose two-column output is
+// reshaped by awk into the same colon-separated shape parseIDMap expects.
+// On a non-POSIX remote (Windows cmd/PowerShell) both fail → empty stdout.
+const usersIDQuery = `getent passwd 2>/dev/null || dscl . -list /Users UniqueID 2>/dev/null | awk '{print $1":x:"$2}'`
+const groupsIDQuery = `getent group 2>/dev/null || dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $1":x:"$2}'`
+
+// applyNames swaps an entry's numeric Owner/Group for the resolved names
+// when known, leaving the number in place otherwise. Lock-free: ensureIDMaps
+// (via sync.Once) publishes the maps before any caller reaches here, and
+// they're never mutated afterward.
+func (s *SFTP) applyNames(e *Entry) {
+	if n, ok := s.userByUID[e.Owner]; ok {
+		e.Owner = n
+	}
+	if n, ok := s.groupByGID[e.Group]; ok {
+		e.Group = n
+	}
+}
+
+// readRemoteText reads a small remote text file via SFTP, capped so a
+// pathological file can't blow up memory. Returns "" on any error.
+func (s *SFTP) readRemoteText(path string) string {
+	f, err := s.c.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 8<<20)) // 8 MiB ceiling
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// parseIDMap parses colon-separated /etc/passwd or /etc/group text into a
+// {decimal-id → name} map. Both formats put the name in field 0 and the id
+// in field 2. Blank lines, comments, and short/malformed lines are skipped.
+func parseIDMap(text string) map[string]string {
+	m := map[string]string{}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		parts := strings.Split(line, ":")
+		if len(parts) < 3 {
+			continue
+		}
+		name, id := parts[0], parts[2]
+		if name != "" && id != "" {
+			if _, dup := m[id]; !dup { // first entry wins on duplicate ids
+				m[id] = name
+			}
+		}
+	}
+	return m
 }
 
 // SuggestRemotePath builds a destination path inside dir for the given

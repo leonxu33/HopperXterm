@@ -54,7 +54,21 @@ func (p *Pane) SftpList(dir string) ([]transport.Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.List(dir)
+	entries, err := s.List(dir)
+	if err != nil {
+		return nil, err
+	}
+	// Windows SFTP servers report uid/gid 0 for every file (NTFS ACLs don't
+	// map to POSIX ownership), so the numbers are meaningless. Blank them so
+	// the UI renders "-" instead of a misleading "0". List-only by design:
+	// statRemote never surfaces owner/group, so Stat needs no equivalent.
+	if p.cachedOSFamily() == "windows" {
+		for i := range entries {
+			entries[i].Owner = ""
+			entries[i].Group = ""
+		}
+	}
+	return entries, nil
 }
 
 // SftpCwd returns the SFTP working directory (typically $HOME).

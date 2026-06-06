@@ -97,3 +97,16 @@ export function formatDate(ms: number): string {
   const pad = (x: number) => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
+
+// formatMode renders a Unix permission mode as an `ls`-style string
+// (e.g. "drwxr-xr-x"). The lead char is l/d/- for symlink/dir/file; the
+// three rwx triplets come from the low 9 bits. Empty for a missing mode.
+// Shared by both file browsers so their Access column reads identically.
+export function formatMode(mode: number | undefined, isDir: boolean, isLink: boolean): string {
+  if (mode == null) return '';
+  const m = mode & 0o777;
+  const triplet = (bits: number) =>
+    `${bits & 4 ? 'r' : '-'}${bits & 2 ? 'w' : '-'}${bits & 1 ? 'x' : '-'}`;
+  const head = isLink ? 'l' : isDir ? 'd' : '-';
+  return head + triplet((m >> 6) & 7) + triplet((m >> 3) & 7) + triplet(m & 7);
+}

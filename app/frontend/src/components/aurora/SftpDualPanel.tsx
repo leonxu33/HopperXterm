@@ -41,7 +41,7 @@ import { ConfirmDialog, Modal, Field, TextInput, PrimaryButton, GhostButton, isM
 import { ContextMenu } from './primitives';
 import type { ContextMenuItem } from './primitives';
 import { runWithConcurrency } from '../../lib/concurrency';
-import { type Entry, sortRows, formatSize, formatDate, withParentRow, isExec } from '../../lib/fileBrowser';
+import { type Entry, sortRows, formatSize, formatDate, formatMode, withParentRow, isExec } from '../../lib/fileBrowser';
 import { FileTable, RenameInput, type ColDef } from './FileTable';
 import { EventsOn } from '../../../wailsjs/runtime/runtime';
 
@@ -1840,11 +1840,11 @@ function renderDualCell(
     case 'modTimeMs':
       return r.modTimeMs ? formatDate(r.modTimeMs) : '';
     case 'owner':
-      return <span style={{ color: TOKENS.fgDim }}>{r.owner || ''}</span>;
+      return <span style={{ color: TOKENS.fgDim }}>{r.owner || '-'}</span>;
     case 'group':
-      return <span style={{ color: TOKENS.fgDim }}>{r.group || ''}</span>;
+      return <span style={{ color: TOKENS.fgDim }}>{r.group || '-'}</span>;
     case 'access':
-      return <span style={{ color: TOKENS.fgDim }}>{formatMode(r.mode, r.isDir, !!r.isSymlink)}</span>;
+      return <span style={{ color: TOKENS.fgDim }}>{formatMode(r.mode, r.isDir, !!r.isSymlink) || '-'}</span>;
     default:
       return null;
   }
@@ -1884,15 +1884,6 @@ function FileIcon({ exec }: { exec?: boolean }) {
 
 
 // ─── helpers ────────────────────────────────────────────────────────────
-
-function formatMode(mode: number | undefined, isDir: boolean, isLink: boolean): string {
-  if (mode == null) return '';
-  const m = mode & 0o777;
-  const triplet = (bits: number) =>
-    `${bits & 4 ? 'r' : '-'}${bits & 2 ? 'w' : '-'}${bits & 1 ? 'x' : '-'}`;
-  const head = isLink ? 'l' : isDir ? 'd' : '-';
-  return head + triplet((m >> 6) & 7) + triplet((m >> 3) & 7) + triplet(m & 7);
-}
 
 function formatTime(ms: number): string {
   if (!ms) return '';

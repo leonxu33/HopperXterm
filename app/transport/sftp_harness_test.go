@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -351,6 +352,74 @@ func TestEntryFromInfo_LocalFile(t *testing.T) {
 	// A plain os.FileInfo has no *sftp.FileStat, so owner/group stay empty.
 	if e.Owner != "" || e.Group != "" {
 		t.Errorf("local FileInfo should not populate owner/group: %q/%q", e.Owner, e.Group)
+	}
+}
+
+func TestParseIDMap(t *testing.T) {
+	// /etc/passwd-style: name:passwd:uid:gid:gecos:home:shell
+	passwd := strings.Join([]string{
+		"# a comment",
+		"root:x:0:0:root:/root:/bin/bash",
+		"alice:x:1000:1000:Alice Example:/home/alice:/bin/bash",
+		"",
+		"daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin",
+		"malformed-line-no-colons",
+		"dup:x:1000:1000::/:/bin/sh", // duplicate uid 1000 — first (alice) wins
+	}, "\n")
+	m := parseIDMap(passwd)
+	if m["0"] != "root" || m["1000"] != "alice" || m["1"] != "daemon" {
+		t.Errorf("passwd parse wrong: %#v", m)
+	}
+	if m["1000"] != "alice" {
+		t.Errorf("duplicate id should keep the first entry, got %q", m["1000"])
+	}
+	if _, ok := m["malformed-line-no-colons"]; ok {
+		t.Error("malformed line should be skipped")
+	}
+
+	// /etc/group-style: name:passwd:gid:members — name@0, id@2, same parser.
+	group := "wheel:x:10:alice,root\r\nsudo:x:27:alice\n"
+	g := parseIDMap(group)
+	if g["10"] != "wheel" || g["27"] != "sudo" {
+		t.Errorf("group parse wrong (incl. CRLF): %#v", g)
+	}
+
+	if len(parseIDMap("")) != 0 {
+		t.Error("empty text should yield an empty map")
+	}
+}
+
+func TestSFTP_ApplyNames(t *testing.T) {
+	s := &SFTP{
+		userByUID:  map[string]string{"1000": "alice"},
+		groupByGID: map[string]string{"20": "staff"},
+	}
+	e := Entry{Owner: "1000", Group: "20"}
+	s.applyNames(&e)
+	if e.Owner != "alice" || e.Group != "staff" {
+		t.Errorf("resolved owner/group = %q/%q, want alice/staff", e.Owner, e.Group)
+	}
+	// Unknown ids (e.g. a macOS Open Directory uid absent from the map)
+	// keep the number rather than blanking.
+	u := Entry{Owner: "501", Group: "0"}
+	s.applyNames(&u)
+	if u.Owner != "501" || u.Group != "0" {
+		t.Errorf("unknown ids should stay numeric, got %q/%q", u.Owner, u.Group)
+	}
+}
+
+// End-to-end: a listing triggers ensureIDMaps, which runs the getent exec
+// query (canned by the harness) and populates the id→name maps.
+func TestSFTP_EnsureIDMapsViaExec(t *testing.T) {
+	s := newTestSFTP(t)
+	if _, err := s.List(remotePath(t.TempDir())); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if s.userByUID["1000"] != "testuser" {
+		t.Errorf("uid map not loaded from exec getent: %#v", s.userByUID)
+	}
+	if s.groupByGID["1000"] != "testgroup" {
+		t.Errorf("gid map not loaded from exec getent: %#v", s.groupByGID)
 	}
 }
 

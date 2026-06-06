@@ -257,6 +257,17 @@ func runExec(ch ssh.Channel, cmd string) {
 		sendExit(ch, 0)
 		return
 	}
+	// Owner/Group name resolution (SFTP.ensureIDMaps) — canned getent output.
+	if strings.Contains(cmd, "getent passwd") {
+		_, _ = io.WriteString(ch, "root:x:0:0:root:/root:/bin/bash\ntestuser:x:1000:1000:Test User:/home/testuser:/bin/bash\n")
+		sendExit(ch, 0)
+		return
+	}
+	if strings.Contains(cmd, "getent group") {
+		_, _ = io.WriteString(ch, "root:x:0:\ntestgroup:x:1000:\n")
+		sendExit(ch, 0)
+		return
+	}
 	// Resource monitor: stream v3 lines until the client closes the channel.
 	line := "v3 1700000000000 12 4000000 8000000 1.5 2.5 10.0 5.0 3600 0.42 " +
 		"5000000 20000000 100000 50000 - - -\n"

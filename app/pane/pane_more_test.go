@@ -433,6 +433,30 @@ func TestSftpWrappers(t *testing.T) {
 	}
 }
 
+func TestSftpList_BlanksOwnerGroupOnWindows(t *testing.T) {
+	p, fc := paneWithFC()
+	fc.listing["/d"] = []transport.Entry{{Name: "a", Owner: "0", Group: "0"}}
+
+	// Non-Windows: owner/group pass through untouched.
+	entries, err := p.SftpList("/d")
+	if err != nil {
+		t.Fatalf("SftpList: %v", err)
+	}
+	if entries[0].Owner != "0" || entries[0].Group != "0" {
+		t.Errorf("non-Windows owner/group should pass through, got %q/%q", entries[0].Owner, entries[0].Group)
+	}
+
+	// Windows: meaningless uid/gid are blanked so the UI shows "-".
+	p.cacheOSFamily("windows")
+	entries, err = p.SftpList("/d")
+	if err != nil {
+		t.Fatalf("SftpList: %v", err)
+	}
+	if entries[0].Owner != "" || entries[0].Group != "" {
+		t.Errorf("Windows owner/group should be blanked, got %q/%q", entries[0].Owner, entries[0].Group)
+	}
+}
+
 func TestSftpWrappers_NoFileClientErrors(t *testing.T) {
 	p := newPane(context.Background(), "p", profile.Session{})
 	if _, err := p.SftpList("/"); err == nil {
