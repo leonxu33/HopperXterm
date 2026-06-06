@@ -16,7 +16,7 @@ html, body {
 /* Custom scrollbars — match the dark glass theme. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
 }
 *::-webkit-scrollbar {
   width: 10px;
@@ -27,7 +27,7 @@ html, body {
   background: transparent;
 }
 *::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.22);
   border-radius: 6px;
   border: 2px solid transparent;
   background-clip: padding-box;

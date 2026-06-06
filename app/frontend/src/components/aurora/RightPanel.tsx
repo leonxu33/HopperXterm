@@ -73,6 +73,12 @@ export function RightPanel({
         flexDirection: 'column',
         minHeight: 0,
         borderLeft: `1px solid ${TOKENS.border}`,
+        // Inset the content from the window's right edge so the file-list
+        // scrollbar (and close button) clear the frameless window's
+        // edge-resize hit-test strip — otherwise scrolling and window-resize
+        // fight over the same pixels now that the panel is flush to the edge.
+        paddingRight: 8,
+        boxSizing: 'border-box',
       }}
     >
       <div
@@ -158,7 +164,7 @@ export function RightPanel({
         </button>
       </div>
 
-      <div style={{ flex: '1 1 auto', overflowY: 'auto', minHeight: 0 }}>
+      <div style={{ flex: '1 1 auto', overflowY: 'auto', overflowX: 'hidden', minHeight: 0 }}>
         {mode === 'sftp' ? (
           <SftpPanel paneId={paneId} paneState={paneState} />
         ) : (

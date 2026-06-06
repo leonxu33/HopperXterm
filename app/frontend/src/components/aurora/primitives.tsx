@@ -106,18 +106,20 @@ export function IconBtn({ children, active, onClick, title, disabled, size = BTN
 // ─── Resizer ──────────────────────────────────────────────────────────────
 // Vertical drag handle for the sidebar / right-panel splits.
 export function Resizer({ onMouseDown }: { onMouseDown: (e: ReactMouseEvent) => void }) {
+  // Invisible drag strip — only the col-resize cursor signals it, matching
+  // the right panel's resize handle. No hover fill: with the divider line now
+  // on the content column, a tinted strip here would clip the sidebar's
+  // session-row selection highlight.
   return (
     <div
       onMouseDown={onMouseDown}
       style={{
-        width: 5,
-        flex: '0 0 5px',
+        width: 4,
+        flex: '0 0 4px',
         cursor: 'col-resize',
         background: 'transparent',
         position: 'relative',
       }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(125,240,196,0.18)')}
-      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
     />
   );
 }

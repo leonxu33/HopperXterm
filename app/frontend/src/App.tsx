@@ -1,6 +1,8 @@
 // Aurora layout — multi-tab + multi-pane.
-// Single Glass island layout: sidebar | resizer | (tab-row + pane-area + right-panel) | statusbar
-// All inside one floating Glass at top:58, left/right:18, bottom:18.
+// Flat full-bleed layout: sidebar | resizer | (tab-row + pane-area + right-panel) | statusbar
+// All inside one edge-to-edge container that fills the window below the title
+// bar (no floating island). The sidebar runs the full height; the status bar
+// lives in the right column so it starts at the sidebar's right edge.
 //
 // Shortcuts (capture-phase so xterm.js doesn't swallow them):
 //   Ctrl+P (all OSes) / Cmd+P (Mac extra) — command palette
@@ -45,7 +47,6 @@ import { EventsOn, WindowFullscreen, WindowUnfullscreen } from '../wailsjs/runti
 import { isMac } from './lib/platform';
 import { initUIPrefs } from './lib/uiprefs';
 import { AuroraFrame } from './components/aurora/AuroraFrame';
-import { Glass } from './components/aurora/Glass';
 import { TopChrome } from './components/aurora/TopChrome';
 import { Sidebar, type Group, type Session } from './components/aurora/Sidebar';
 import { TabBar, type Tab, type PaneState } from './components/aurora/TabBar';
@@ -1783,26 +1784,29 @@ function App() {
         />
       )}
 
-      <Glass
+      {/* Main content surface — fills the window edge-to-edge below the
+          title bar (no floating island, no inset/border/radius/shadow). It
+          starts flush under TopChrome (top:0, height topChromeHeight+10) in
+          the normal layout, and at the very top in full-screen mode where the
+          title bar is hidden. Background is the same translucent tint + lift
+          the old Glass island used (glassBg over the aurora backdrop), so the
+          body keeps the panel's lighter tone rather than a flat dark fill. No
+          backdrop-filter blur (always-on surface — see backdrop-filter-perf). */}
+      <div
         style={{
           position: 'absolute',
-          // Normally sits below TopChrome (top:0, height topChromeHeight+10)
-          // with a 10px gap — derived from the token so the two stay aligned
-          // if the chrome height is ever tuned. In full-screen mode the title
-          // bar is gone, so the island goes edge-to-edge (no offset/padding,
-          // square corners) and the panes fill the whole window.
-          top: fullscreen ? 0 : TOKENS.topChromeHeight + 20,
-          left: fullscreen ? 0 : TOKENS.framePadding,
-          right: fullscreen ? 0 : TOKENS.framePadding,
-          bottom: fullscreen ? 0 : TOKENS.framePadding,
-          borderRadius: fullscreen ? 0 : undefined,
+          top: fullscreen ? 0 : TOKENS.topChromeHeight + 10,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: `linear-gradient(180deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.015) 100%), ${TOKENS.glassBg}`,
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
           zIndex: 1,
         }}
       >
-        {/* Single horizontal row so the sidebar runs the entire Glass
+        {/* Single horizontal row so the sidebar runs the entire container
             height. The tab row, body, and status bar all live inside
             the right column, starting at the sidebar's right edge. */}
         <div style={{ flex: '1 1 auto', display: 'flex', minHeight: 0 }}>
@@ -1815,7 +1819,6 @@ function App() {
                 width: 28,
                 flex: '0 0 28px',
                 minHeight: 0,
-                borderRight: `1px solid ${TOKENS.border}`,
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
@@ -1866,7 +1869,6 @@ function App() {
                   width: sidebarWidth,
                   flex: `0 0 ${sidebarWidth}px`,
                   minHeight: 0,
-                  borderRight: `1px solid ${TOKENS.border}`,
                 }}
               >
                 <Sidebar
@@ -1897,8 +1899,19 @@ function App() {
             </>
           )}
 
-          {/* Right column: tab-row + body */}
-          <div style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+          {/* Right column: tab-row + body. Owns the vertical divider line
+              (borderLeft) so the tabs/terminal sit flush against it; the
+              sidebar resize strip lives to the line's left (sidebar side).
+              No line in full-screen mode — there's no sidebar beside it. */}
+          <div
+            style={{
+              flex: '1 1 auto',
+              minWidth: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              borderLeft: fullscreen ? undefined : `1px solid ${TOKENS.border}`,
+            }}
+          >
             {/* Tab row */}
             <div
               style={{
@@ -2067,10 +2080,14 @@ function App() {
                       key={t.id}
                       style={{
                         position: 'absolute',
+                        // Small inset on all sides so the active pane's accent
+                        // ring isn't flush against the window edge (where it'd
+                        // be a single pixel column, clipped at the DWM-rounded
+                        // corners). left also clears the sidebar resizer.
                         top: 0,
-                        right: 0,
-                        bottom: 0,
-                        left: 8,
+                        right: 4,
+                        bottom: 4,
+                        left: 4,
                         visibility: t.id === activeTabId ? 'visible' : 'hidden',
                         pointerEvents: t.id === activeTabId ? 'auto' : 'none',
                         display: 'flex',
@@ -2191,7 +2208,7 @@ function App() {
             )}
           </div>
         </div>
-      </Glass>
+      </div>
 
       {tabCtxMenu && (
         <ContextMenu

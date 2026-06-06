@@ -321,7 +321,7 @@ export function Sidebar({
       {/* Scrollable tree */}
       <div
         ref={scrollRef}
-        style={{ flex: '1 1 auto', overflowY: 'auto', padding: '0 6px 12px', minHeight: 0 }}
+        style={{ flex: '1 1 auto', overflowY: 'auto', overflowX: 'hidden', padding: '0 6px 12px', minHeight: 0 }}
         onClick={(e) => {
           if (e.target === e.currentTarget) onSelectSession(null);
         }}
@@ -414,6 +414,7 @@ export function Sidebar({
                 }}
                 style={{
                   width: '100%',
+                  boxSizing: 'border-box',
                   display: 'flex',
                   alignItems: 'center',
                   gap: 8,
@@ -712,6 +713,7 @@ function SessionRow({
         }}
         style={{
           width: '100%',
+          boxSizing: 'border-box',
           display: 'flex',
           alignItems: 'center',
           gap: 9,
