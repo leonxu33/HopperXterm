@@ -21,6 +21,7 @@ import {
 } from './Modal';
 import { ProtoIcon } from '../aurora/ProtoIcon';
 import { WithTip } from '../aurora/primitives';
+import { sanitizeLabel } from '../../lib/format';
 import {
   ListAWSProfiles,
   ListBuckets,
@@ -459,7 +460,7 @@ export function NewSessionModal({
         <Field label="Session name">
           <TextInput
             value={label}
-            onChange={setLabel}
+            onChange={(v) => setLabel(sanitizeLabel(v))}
             placeholder={derivedLabel()}
             onKeyDown={onEnter}
           />

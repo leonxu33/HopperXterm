@@ -7,6 +7,7 @@ import { useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ICON, FS, TOKENS } from '../../theme';
 import { Modal, Field, TextInput, PrimaryButton, GhostButton } from './Modal';
+import { sanitizeLabel } from '../../lib/format';
 
 // A single tab the user can choose to include. paneCount is the number of
 // shell panes that would actually be saved (file-only panes are excluded
@@ -85,7 +86,7 @@ export function SaveWorkspaceModal({
     >
       {err && <div style={errBox}>{err}</div>}
       <Field label="Name">
-        <TextInput value={name} onChange={setName} placeholder="prod-deploy" autoFocus />
+        <TextInput value={name} onChange={(v) => setName(sanitizeLabel(v))} placeholder="prod-deploy" autoFocus />
       </Field>
 
       {showPicker && (

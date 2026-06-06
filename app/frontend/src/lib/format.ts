@@ -11,3 +11,13 @@ export function formatRelative(ms: number): string {
   if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`;
   return new Date(ms).toLocaleDateString();
 }
+
+// sanitizeLabel strips characters that aren't plaintext-friendly from a
+// user-facing label (session / macro / workspace names). It keeps Unicode
+// letters and numbers, whitespace, and the three common word separators
+// (`-`, `_`, `.`) — everything else (shell/path metacharacters, quotes,
+// brackets, emoji, other punctuation) is dropped. Applied on input so the
+// disallowed characters can never be typed into the field in the first place.
+export function sanitizeLabel(s: string): string {
+  return s.replace(/[^\p{L}\p{N}\s._-]/gu, '');
+}

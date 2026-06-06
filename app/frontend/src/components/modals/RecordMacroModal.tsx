@@ -12,6 +12,7 @@ import '@xterm/xterm/css/xterm.css';
 import { ICON, FS, TOKENS } from '../../theme';
 import { Modal, Field, TextInput, PrimaryButton, GhostButton } from './Modal';
 import { renderBytes } from './bytePreview';
+import { sanitizeLabel } from '../../lib/format';
 
 type Props = {
   onCancel: () => void;
@@ -126,7 +127,7 @@ export function RecordMacroModal({ onCancel, onSave }: Props) {
         </div>
       </Field>
       <Field label="Macro name">
-        <TextInput value={name} onChange={setName} placeholder="e.g. tail syslog" />
+        <TextInput value={name} onChange={(v) => setName(sanitizeLabel(v))} placeholder="e.g. tail syslog" />
       </Field>
     </Modal>
   );
