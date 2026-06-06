@@ -40,8 +40,11 @@ export const TOKENS = {
   sidebarWidth: 252,
   sidebarMinWidth: 200,
   sidebarMaxWidth: 360,
-  rightPanelWidth: 320,
-  rightPanelMinWidth: 240,
+  rightPanelWidth: 280,
+  // Floor kept high enough that the Remote Files toolbar (incl. the trailing
+  // Delete-selected button) stays visible — below this the panel clips the
+  // last button (overflow-x hidden).
+  rightPanelMinWidth: 260,
   rightPanelMaxWidth: 480,
   topChromeHeight: 38,
   tabBarHeight: 42,

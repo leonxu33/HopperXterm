@@ -700,6 +700,7 @@ function PaneCellView({ leaf, ctx }: { leaf: PaneLeaf; ctx: RenderCtx }) {
           type={info.type}
           active={active}
           canSplit={!atMax}
+          canDrag={ctx.multiPane}
           onSplitRight={ctx.onSplitRight ? () => ctx.onSplitRight!(leaf.id) : undefined}
           onSplitDown={ctx.onSplitDown ? () => ctx.onSplitDown!(leaf.id) : undefined}
           onReloadPane={ctx.onReloadPane ? () => ctx.onReloadPane!(leaf.id) : undefined}
@@ -823,6 +824,7 @@ function PaneHeader({
   type,
   active,
   canSplit,
+  canDrag,
   onSplitRight,
   onSplitDown,
   onReloadPane,
@@ -834,6 +836,9 @@ function PaneHeader({
   type: string;
   active: boolean;
   canSplit: boolean;
+  // Pane-to-pane drag only makes sense with ≥2 panes; a lone pane has
+  // nothing to rearrange, so it's non-draggable (no grab cursor either).
+  canDrag: boolean;
   onSplitRight?: () => void;
   onSplitDown?: () => void;
   onReloadPane?: () => void;
@@ -870,13 +875,14 @@ function PaneHeader({
 
   return (
     <div
-      draggable
+      draggable={canDrag}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
         setMenu({ x: e.clientX, y: e.clientY });
       }}
       onDragStart={(e) => {
+        if (!canDrag) return;
         e.stopPropagation();
         try {
           e.dataTransfer.setData('application/x-hopper-pane', paneId);
@@ -902,7 +908,7 @@ function PaneHeader({
         color: active ? TOKENS.fg : TOKENS.fgDim,
         font: `${active ? 600 : 540} ${FS.base}px/1 ${TOKENS.font}`,
         userSelect: 'none',
-        cursor: 'grab',
+        cursor: canDrag ? 'grab' : 'default',
       }}
     >
       <ProtoIcon kind={type} size={ICON.sm} />
