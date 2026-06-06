@@ -754,6 +754,7 @@ function SessionRow({
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
                 }}
+                onMouseEnter={(e) => overflowTitle(e, session.label || '(unnamed)')}
               >
                 {session.label || '(unnamed)'}
               </span>
@@ -777,7 +778,10 @@ function SessionRow({
             </span>
             {sub && <span style={{ opacity: 0.5 }}>·</span>}
             {sub && (
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <span
+                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                onMouseEnter={(e) => overflowTitle(e, sub)}
+              >
                 {sub}
               </span>
             )}
@@ -977,6 +981,13 @@ function HeaderBtn({
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
+
+// Set a native tooltip only when the element's text is actually truncated
+// (the ellipsis is active). Cleared otherwise so short rows never show one.
+function overflowTitle(e: React.MouseEvent<HTMLElement>, full: string) {
+  const el = e.currentTarget;
+  el.title = el.scrollWidth > el.clientWidth ? full : '';
+}
 
 function subtitleFor(s: Session): string {
   switch (s.type) {
