@@ -100,6 +100,7 @@ import { SaveWorkspaceModal } from './components/modals/WorkspaceModals';
 import { WorkspacesPopover } from './components/modals/WorkspacesPopover';
 import { SettingsMenu } from './components/modals/SettingsMenu';
 import { ShortcutsModal } from './components/modals/ShortcutsModal';
+import { AboutModal } from './components/modals/AboutModal';
 import { CustomKeysModal } from './components/modals/CustomKeysModal';
 import { ShortcutsOverlay } from './components/modals/ShortcutsOverlay';
 import { MacrosPopover, type MacroEntry } from './components/modals/MacrosPopover';
@@ -289,6 +290,7 @@ function App() {
   // Settings menu (top-right gear) — Export / Import configuration.
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [customKeysOpen, setCustomKeysOpen] = useState(false);
   const [helpOverlay, setHelpOverlay] = useState(false);
   // Bumped on F2 to start inline rename in the sidebar / tab bar (the file
@@ -2572,10 +2574,15 @@ function App() {
             setSettingsOpen(false);
             setCustomKeysOpen(true);
           }}
+          onAbout={() => {
+            setSettingsOpen(false);
+            setAboutOpen(true);
+          }}
           onClose={() => setSettingsOpen(false)}
         />
       )}
       {shortcutsOpen && <ShortcutsModal onClose={() => setShortcutsOpen(false)} />}
+      {aboutOpen && <AboutModal onClose={() => setAboutOpen(false)} />}
       {customKeysOpen && <CustomKeysModal onClose={() => setCustomKeysOpen(false)} />}
       {helpOverlay && <ShortcutsOverlay />}
     </AuroraFrame>

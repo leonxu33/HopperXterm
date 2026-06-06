@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	_ "embed"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -17,6 +19,14 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+// wailsJSON is the build config embedded at compile time. It's the single
+// source of truth for the product version — the same file drives the installer
+// asset name and the git tag — so AppVersion stays in sync with releases
+// automatically (bump info.productVersion and every consumer follows).
+//
+//go:embed wails.json
+var wailsJSON []byte
+
 // App is the Wails root. Frontend calls reach the backend through methods
 // declared on this struct; Wails generates TypeScript bindings on build.
 type App struct {
@@ -31,6 +41,25 @@ type App struct {
 
 func NewApp() *App {
 	return &App{}
+}
+
+// AppVersion returns the version shown in the About dialog. Under the `dev`
+// build tag that `wails dev` compiles with it reports "dev" (see
+// version_dev.go); release builds return info.productVersion from the embedded
+// wails.json. Returns "" if the field is missing/unparseable.
+func (a *App) AppVersion() string {
+	if devVersionLabel != "" {
+		return devVersionLabel
+	}
+	var cfg struct {
+		Info struct {
+			ProductVersion string `json:"productVersion"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(wailsJSON, &cfg); err != nil {
+		return ""
+	}
+	return cfg.Info.ProductVersion
 }
 
 func (a *App) startup(ctx context.Context) {

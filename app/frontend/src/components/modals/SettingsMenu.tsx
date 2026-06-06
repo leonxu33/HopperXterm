@@ -11,10 +11,11 @@ type Props = {
   onImport: () => void;
   onShortcuts: () => void;
   onCustomKeys: () => void;
+  onAbout: () => void;
   onClose: () => void;
 };
 
-export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustomKeys, onClose }: Props) {
+export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustomKeys, onAbout, onClose }: Props) {
   const ref = useAnchoredDismiss(anchor, onClose);
 
   if (!anchor) return null;
@@ -46,7 +47,6 @@ export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustom
 
       <MenuRow
         label="Export configuration…"
-        sub="Save sessions, groups, workspaces & macros to a .zip"
         onClick={onExport}
         icon={
           <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
@@ -57,7 +57,6 @@ export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustom
       />
       <MenuRow
         label="Import configuration…"
-        sub="Replace local config from a .zip"
         onClick={onImport}
         icon={
           <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
@@ -71,7 +70,6 @@ export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustom
 
       <MenuRow
         label="Custom shortcuts…"
-        sub="Send your own key sequences, per shell type"
         onClick={onCustomKeys}
         icon={
           <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
@@ -85,7 +83,6 @@ export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustom
 
       <MenuRow
         label="Keyboard shortcuts"
-        sub="Tab, pane & terminal chords"
         onClick={onShortcuts}
         icon={
           <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
@@ -99,18 +96,27 @@ export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustom
           </svg>
         }
       />
+
+      <MenuRow
+        label="About HopperXterm"
+        onClick={onAbout}
+        icon={
+          <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.2" />
+            <path d="M8 7.2 V11 M8 4.8 L8 5.1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          </svg>
+        }
+      />
     </div>
   );
 }
 
 function MenuRow({
   label,
-  sub,
   icon,
   onClick,
 }: {
   label: string;
-  sub: string;
   icon: ReactNode;
   onClick: () => void;
 }) {
@@ -122,10 +128,7 @@ function MenuRow({
       onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
     >
       <span style={{ color: TOKENS.accent, flex: '0 0 auto', display: 'flex' }}>{icon}</span>
-      <span style={{ flex: 1, minWidth: 0 }}>
-        <span style={rowName}>{label}</span>
-        <span style={rowSub}>{sub}</span>
-      </span>
+      <span style={{ ...rowName, flex: 1, minWidth: 0 }}>{label}</span>
     </button>
   );
 }
@@ -152,13 +155,6 @@ const rowStyle: CSSProperties = {
   transition: 'background .12s',
 };
 const rowName: CSSProperties = {
-  display: 'block',
   fontWeight: 540,
   fontSize: FS.lg,
-};
-const rowSub: CSSProperties = {
-  display: 'block',
-  marginTop: 2,
-  fontSize: FS.sm,
-  color: TOKENS.fgMute,
 };
