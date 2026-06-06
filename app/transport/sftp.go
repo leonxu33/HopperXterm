@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -141,21 +142,50 @@ func (s *SFTP) List(dir string) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Entry, 0, len(infos))
-	for _, fi := range infos {
-		e := entryFromInfo(fi)
+	out := make([]Entry, len(infos))
+	var links []int // indices of symlink entries to resolve
+	for i, fi := range infos {
+		out[i] = entryFromInfo(fi)
 		if fi.Mode()&os.ModeSymlink != 0 {
-			full := path.Join(dir, fi.Name())
-			if target, lerr := s.c.ReadLink(full); lerr == nil {
-				e.Target = target
-				// Stat the target to know if it's a directory.
-				if tinfo, terr := s.c.Stat(full); terr == nil {
-					e.IsDir = tinfo.IsDir()
-				}
-			}
-			e.IsSymlink = true
+			out[i].IsSymlink = true
+			links = append(links, i)
 		}
-		out = append(out, e)
+	}
+	// Resolve symlink targets concurrently. Each link costs a ReadLink plus
+	// a Stat (to learn whether the target is a directory) — done serially
+	// that's 2 round trips per link, so a symlink-heavy directory like
+	// /usr/bin took seconds. pkg/sftp multiplexes requests over the single
+	// connection, so a bounded worker pool collapses N serial round trips
+	// into ~N/workers. Each worker writes a distinct index → no locking.
+	if len(links) > 0 {
+		const maxWorkers = 12
+		workers := maxWorkers
+		if len(links) < workers {
+			workers = len(links)
+		}
+		jobs := make(chan int)
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for i := range jobs {
+					full := path.Join(dir, infos[i].Name())
+					if target, lerr := s.c.ReadLink(full); lerr == nil {
+						out[i].Target = target
+						// Stat (follows the link) to know if it's a directory.
+						if tinfo, terr := s.c.Stat(full); terr == nil {
+							out[i].IsDir = tinfo.IsDir()
+						}
+					}
+				}
+			}()
+		}
+		for _, i := range links {
+			jobs <- i
+		}
+		close(jobs)
+		wg.Wait()
 	}
 	sortEntries(out)
 	return out, nil

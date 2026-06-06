@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -82,6 +83,54 @@ func TestSFTP_MkdirListStat(t *testing.T) {
 	// SFTP entries carry numeric owner/group strings from the FileStat.
 	if st.Owner == "" {
 		t.Errorf("expected an SFTP owner string, got empty")
+	}
+}
+
+// List resolves every symlink's target + is-it-a-dir flag, and does so
+// concurrently (a worker pool) so a symlink-heavy directory like /usr/bin
+// doesn't pay 2 serial round trips per link. This exercises the pool well
+// past its width with a mix of dir- and file-targeted links.
+func TestSFTP_ListResolvesSymlinksConcurrently(t *testing.T) {
+	s := newTestSFTP(t)
+	host := t.TempDir()
+	base := remotePath(host)
+
+	if err := os.MkdirAll(filepath.Join(host, "realdir"), 0o755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(host, "realfile.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	const n = 20 // > the 12-worker pool, so jobs queue
+	for i := 0; i < n; i++ {
+		// Skip on platforms where symlink creation isn't permitted
+		// (Windows without Developer Mode / admin).
+		if err := os.Symlink(filepath.Join(host, "realdir"), filepath.Join(host, fmt.Sprintf("dlink%02d", i))); err != nil {
+			t.Skipf("symlinks not supported here: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(host, "realfile.txt"), filepath.Join(host, fmt.Sprintf("flink%02d", i))); err != nil {
+			t.Skipf("symlinks not supported here: %v", err)
+		}
+	}
+
+	entries, err := s.List(base)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	byName := map[string]Entry{}
+	for _, e := range entries {
+		byName[e.Name] = e
+	}
+	for i := 0; i < n; i++ {
+		d := byName[fmt.Sprintf("dlink%02d", i)]
+		if !d.IsSymlink || !d.IsDir || d.Target == "" {
+			t.Errorf("dir symlink %d resolved wrong: %+v", i, d)
+		}
+		f := byName[fmt.Sprintf("flink%02d", i)]
+		if !f.IsSymlink || f.IsDir || f.Target == "" {
+			t.Errorf("file symlink %d resolved wrong: %+v", i, f)
+		}
 	}
 }
 
