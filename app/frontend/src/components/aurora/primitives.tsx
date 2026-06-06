@@ -5,6 +5,42 @@ import { createPortal } from 'react-dom';
 import type { CSSProperties, ReactNode, MouseEvent as ReactMouseEvent } from 'react';
 import { BTN, ICON, FS, TOKENS } from '../../theme';
 
+// ─── WithTip ────────────────────────────────────────────────────────────────
+// Wires a themed tooltip onto a button via the delegated TooltipHost. An
+// enabled button carries `data-tip` directly (no wrapper, no layout change).
+// A *disabled* <button> dispatches no mouse events in Chromium/WebView2, so the
+// tooltip would never fire — wrap it in a hoverable span instead (the button is
+// made pointer-inert by its own disabled styling). Pass `disabled` through so
+// the wrapper is only added when needed.
+export function WithTip({
+  title,
+  disabled,
+  block,
+  children,
+}: {
+  title?: string;
+  disabled?: boolean;
+  // Use a block-level wrapper for full-width buttons (e.g. a footer action),
+  // so the wrapped button keeps filling its row. Default is an inline-flex
+  // wrapper sized to the button — right for fixed-size icon buttons.
+  block?: boolean;
+  children: ReactNode;
+}) {
+  // Only a disabled button needs the wrapper (it dispatches no mouse events);
+  // an enabled button carries data-tip on itself, so pass it through untouched.
+  if (title && disabled) {
+    return (
+      <span
+        data-tip={title}
+        style={block ? { display: 'block' } : { display: 'inline-flex', flex: '0 0 auto' }}
+      >
+        {children}
+      </span>
+    );
+  }
+  return <>{children}</>;
+}
+
 // ─── ToolBtn ──────────────────────────────────────────────────────────────
 // Tab-row toolbar icon button (Workspaces, Sync input, SFTP, Resources).
 // Box is BTN.tool — shared with the sidebar HeaderBtn so they stay identical.
@@ -33,30 +69,33 @@ export const ToolBtn = forwardRef<HTMLButtonElement, ToolBtnProps>(function Tool
     justifyContent: 'center',
     flex: '0 0 auto',
     opacity: disabled ? 0.4 : 1,
+    pointerEvents: disabled ? 'none' : undefined,
   };
   return (
-    <button
-      ref={ref}
-      onClick={onClick}
-      title={title}
-      disabled={disabled}
-      style={base}
-      onMouseEnter={(e) => {
-        if (disabled) return;
-        if (!active) {
-          e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
-          e.currentTarget.style.color = TOKENS.fg;
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!active) {
-          e.currentTarget.style.background = 'transparent';
-          e.currentTarget.style.color = TOKENS.fgDim;
-        }
-      }}
-    >
-      {children}
-    </button>
+    <WithTip title={title} disabled={disabled}>
+      <button
+        ref={ref}
+        onClick={onClick}
+        data-tip={title}
+        disabled={disabled}
+        style={base}
+        onMouseEnter={(e) => {
+          if (disabled) return;
+          if (!active) {
+            e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+            e.currentTarget.style.color = TOKENS.fg;
+          }
+        }}
+        onMouseLeave={(e) => {
+          if (!active) {
+            e.currentTarget.style.background = 'transparent';
+            e.currentTarget.style.color = TOKENS.fgDim;
+          }
+        }}
+      >
+        {children}
+      </button>
+    </WithTip>
   );
 });
 
@@ -66,40 +105,43 @@ export const ToolBtn = forwardRef<HTMLButtonElement, ToolBtnProps>(function Tool
 type IconBtnProps = ToolBtnProps & { size?: number };
 export function IconBtn({ children, active, onClick, title, disabled, size = BTN.icon.size }: IconBtnProps) {
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      disabled={disabled}
-      style={{
-        width: size,
-        height: size,
-        border: 0,
-        borderRadius: BTN.icon.radius,
-        background: active ? TOKENS.accentDim : 'rgba(255,255,255,0.05)',
-        color: active ? TOKENS.accent : TOKENS.fgDim,
-        cursor: disabled ? 'default' : 'pointer',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flex: '0 0 auto',
-        opacity: disabled ? 0.35 : 1,
-      }}
-      onMouseEnter={(e) => {
-        if (disabled) return;
-        if (!active) {
-          e.currentTarget.style.background = 'rgba(255,255,255,0.09)';
-          e.currentTarget.style.color = TOKENS.fg;
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!active) {
-          e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
-          e.currentTarget.style.color = TOKENS.fgDim;
-        }
-      }}
-    >
-      {children}
-    </button>
+    <WithTip title={title} disabled={disabled}>
+      <button
+        onClick={onClick}
+        data-tip={title}
+        disabled={disabled}
+        style={{
+          width: size,
+          height: size,
+          border: 0,
+          borderRadius: BTN.icon.radius,
+          background: active ? TOKENS.accentDim : 'rgba(255,255,255,0.05)',
+          color: active ? TOKENS.accent : TOKENS.fgDim,
+          cursor: disabled ? 'default' : 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flex: '0 0 auto',
+          opacity: disabled ? 0.35 : 1,
+          pointerEvents: disabled ? 'none' : undefined,
+        }}
+        onMouseEnter={(e) => {
+          if (disabled) return;
+          if (!active) {
+            e.currentTarget.style.background = 'rgba(255,255,255,0.09)';
+            e.currentTarget.style.color = TOKENS.fg;
+          }
+        }}
+        onMouseLeave={(e) => {
+          if (!active) {
+            e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+            e.currentTarget.style.color = TOKENS.fgDim;
+          }
+        }}
+      >
+        {children}
+      </button>
+    </WithTip>
   );
 }
 
@@ -327,6 +369,23 @@ export function ContextMenu({
 // when an ancestor has backdrop-filter / transform / filter.
 export type TooltipRow = [string, string];
 
+// Shared themed-tooltip surface. Both the wrapper <Tooltip> (rich rows /
+// content) and the delegated <TooltipHost> (data-tip strings) render this box
+// so every tooltip in the app looks identical. Callers add the dynamic
+// left/top/transform and any whiteSpace/overflow tweaks on top.
+export const TOOLTIP_SURFACE: CSSProperties = {
+  position: 'fixed',
+  padding: '6px 10px',
+  background: 'rgba(14, 18, 26, 0.97)',
+  color: TOKENS.fg,
+  border: `1px solid ${TOKENS.borderHi}`,
+  borderRadius: 6,
+  boxShadow: '0 10px 28px -8px rgba(0,0,0,0.55)',
+  font: `${FS.base}px/1.45 ${TOKENS.mono}`,
+  maxWidth: 520,
+  zIndex: 200,
+};
+
 export function Tooltip({
   rows,
   content,
@@ -416,22 +475,13 @@ export function Tooltip({
             onMouseEnter={cancelHide}
             onMouseLeave={scheduleHide}
             style={{
-              position: 'fixed',
+              ...TOOLTIP_SURFACE,
               left: pos.x,
               top: pos.y,
               transform: `translate(-50%, ${pos.above ? '-100%' : '0'})`,
-              padding: '6px 10px',
-              background: 'rgba(14, 18, 26, 0.97)',
-              color: TOKENS.fg,
-              border: `1px solid ${TOKENS.borderHi}`,
-              borderRadius: 6,
-              boxShadow: '0 10px 28px -8px rgba(0,0,0,0.55)',
-              font: `${FS.base}px/1.45 ${TOKENS.mono}`,
               whiteSpace: 'pre',
-              maxWidth: 520,
               maxHeight: 360,
               overflow: 'auto',
-              zIndex: 200,
             }}
           >
             {rows && rows.length > 0 ? (

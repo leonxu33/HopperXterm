@@ -75,9 +75,9 @@ export function MacrosPopover({
             // Don't dim the row when replay is unavailable — keep the name /
             // key-count / date at the same colors as the Saved-workspaces
             // entries. The "can't replay now" state is still conveyed by the
-            // default cursor, the title tooltip, and the no-op click guard.
+            // default cursor, the tooltip, and the no-op click guard.
             style={{ ...rowStyle, cursor: canReplay ? 'pointer' : 'default' }}
-            title={canReplay ? 'Replay into the active terminal' : 'Focus a terminal pane to replay'}
+            data-tip={canReplay ? 'Replay into the active terminal' : 'Focus a terminal pane to replay'}
             onMouseEnter={(e) => {
               if (canReplay) e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
             }}
@@ -100,7 +100,7 @@ export function MacrosPopover({
               </div>
             </div>
             <button
-              title="Delete"
+              data-tip="Delete"
               onClick={(e) => {
                 e.stopPropagation();
                 onDelete(m.id);

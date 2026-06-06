@@ -108,7 +108,7 @@ export function Modal({
             <div style={titleStyle}>{title}</div>
             {subtitle && <div style={subtitleStyle}>{subtitle}</div>}
           </div>
-          <button onClick={onClose} style={closeBtn} title="Close (Esc)">
+          <button onClick={onClose} style={closeBtn} data-tip="Close (Esc)">
             <svg width={ICON.xs} height={ICON.xs} viewBox="0 0 12 12">
               <path d="M2 2 L10 10 M10 2 L2 10" stroke="currentColor" strokeWidth="1.4" />
             </svg>
@@ -232,7 +232,7 @@ export function SecretInput({
       <button
         type="button"
         onClick={() => setReveal((r) => !r)}
-        title={reveal ? 'Hide' : 'Reveal'}
+        data-tip={reveal ? 'Hide' : 'Reveal'}
         style={secretToggleBtn}
         onMouseEnter={(e) => {
           e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
@@ -307,7 +307,7 @@ export function FilePicker({
       <button
         type="button"
         onClick={browse}
-        title="Browse…"
+        data-tip="Browse…"
         style={{
           ...secretToggleBtn,
           padding: '0 12px',
@@ -682,7 +682,7 @@ export function Combo({
       <button
         type="button"
         tabIndex={-1}
-        title="Show options"
+        data-tip="Show options"
         onMouseDown={(e) => {
           e.preventDefault();
           if (open) close();

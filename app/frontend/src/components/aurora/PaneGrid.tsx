@@ -21,7 +21,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { ICON, FS, TOKENS, PROTOCOL_COLORS } from '../../theme';
 import { ProtoIcon, PROTO_LABELS } from './ProtoIcon';
-import { ContextMenu, type ContextMenuItem } from './primitives';
+import { ContextMenu, WithTip, type ContextMenuItem } from './primitives';
 
 export const PANE_LIMIT = 6;
 
@@ -554,7 +554,7 @@ export function PaneGrid({
           <div
             key={`sp-${s.path.join('.')}-${s.idx}`}
             onMouseDown={(e) => ctx.startResize(e, s.path, s.idx, s.axis, s.wa, s.wb, spanFrac)}
-            title="Drag to resize"
+            data-tip="Drag to resize"
             style={
               s.axis === 'x'
                 ? {
@@ -1012,41 +1012,44 @@ function HeaderBtn({
   danger?: boolean;
 }) {
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      disabled={disabled}
-      style={{
-        width: 22,
-        height: 22,
-        border: 0,
-        borderRadius: 4,
-        background: 'transparent',
-        color: 'inherit',
-        cursor: disabled ? 'default' : 'pointer',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        opacity: disabled ? 0.35 : 0.7,
-        flex: '0 0 auto',
-      }}
-      onMouseEnter={(e) => {
-        if (disabled) return;
-        e.currentTarget.style.opacity = '1';
-        e.currentTarget.style.background = danger
-          ? 'rgba(255,90,90,0.18)'
-          : 'rgba(255,255,255,0.07)';
-        if (danger) e.currentTarget.style.color = '#ffb4b4';
-      }}
-      onMouseLeave={(e) => {
-        if (disabled) return;
-        e.currentTarget.style.opacity = '0.7';
-        e.currentTarget.style.background = 'transparent';
-        e.currentTarget.style.color = 'inherit';
-      }}
-    >
-      {children}
-    </button>
+    <WithTip title={title} disabled={disabled}>
+      <button
+        onClick={onClick}
+        data-tip={title}
+        disabled={disabled}
+        style={{
+          width: 22,
+          height: 22,
+          border: 0,
+          borderRadius: 4,
+          background: 'transparent',
+          color: 'inherit',
+          cursor: disabled ? 'default' : 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          opacity: disabled ? 0.35 : 0.7,
+          flex: '0 0 auto',
+          pointerEvents: disabled ? 'none' : undefined,
+        }}
+        onMouseEnter={(e) => {
+          if (disabled) return;
+          e.currentTarget.style.opacity = '1';
+          e.currentTarget.style.background = danger
+            ? 'rgba(255,90,90,0.18)'
+            : 'rgba(255,255,255,0.07)';
+          if (danger) e.currentTarget.style.color = '#ffb4b4';
+        }}
+        onMouseLeave={(e) => {
+          if (disabled) return;
+          e.currentTarget.style.opacity = '0.7';
+          e.currentTarget.style.background = 'transparent';
+          e.currentTarget.style.color = 'inherit';
+        }}
+      >
+        {children}
+      </button>
+    </WithTip>
   );
 }
 

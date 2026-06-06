@@ -38,7 +38,7 @@ import {
   SftpUploadFile,
 } from '../../../wailsjs/go/main/App';
 import { ConfirmDialog, Modal, Field, TextInput, PrimaryButton, GhostButton, isModalOpen } from '../modals/Modal';
-import { ContextMenu } from './primitives';
+import { ContextMenu, WithTip } from './primitives';
 import type { ContextMenuItem } from './primitives';
 import { runWithConcurrency } from '../../lib/concurrency';
 import { type Entry, sortRows, formatSize, formatDate, formatMode, withParentRow, isExec } from '../../lib/fileBrowser';
@@ -1220,7 +1220,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
                     whiteSpace: 'nowrap',
                     fontFamily: TOKENS.mono,
                   }}
-                  title={t.path}
+                  data-tip={t.path}
                 >
                   {fname}
                 </span>
@@ -1233,7 +1233,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
                     overflow: 'hidden',
                     position: 'relative',
                   }}
-                  title={
+                  data-tip={
                     t.totalBytes > 0
                       ? `${formatSize(t.bytes)} / ${formatSize(t.totalBytes)}`
                       : formatSize(t.bytes)
@@ -1277,7 +1277,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
                 </span>
                 <button
                   type="button"
-                  title={t.state === 'running' ? 'Cancel' : 'Dismiss'}
+                  data-tip={t.state === 'running' ? 'Cancel' : 'Dismiss'}
                   onClick={() => {
                     if (t.state === 'running') {
                       void CancelSftpTransfer(t.id);
@@ -1371,7 +1371,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
           </span>
           <span style={{ flex: 1 }} />
           <button
-            title="Clear"
+            data-tip="Clear"
             type="button"
             onClick={(e) => {
               e.stopPropagation();
@@ -1727,37 +1727,40 @@ function NavBtn({
   accent?: string;
 }) {
   return (
-    <button
-      type="button"
-      title={title}
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        width: 30,
-        height: 30,
-        border: 0,
-        borderRadius: 7,
-        cursor: disabled ? 'default' : 'pointer',
-        background: danger ? 'rgba(255,90,90,0.10)' : 'rgba(255,255,255,0.05)',
-        color: danger ? 'rgba(255,140,140,0.85)' : accent ? accent : TOKENS.fgDim,
-        opacity: disabled ? 0.35 : 1,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        transition: 'background .12s, color .12s',
-      }}
-      onMouseEnter={(e) => {
-        if (disabled) return;
-        e.currentTarget.style.background = danger ? 'rgba(255,90,90,0.18)' : 'rgba(255,255,255,0.10)';
-        if (!danger && !accent) e.currentTarget.style.color = TOKENS.fg;
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = danger ? 'rgba(255,90,90,0.10)' : 'rgba(255,255,255,0.05)';
-        if (!danger && !accent) e.currentTarget.style.color = TOKENS.fgDim;
-      }}
-    >
-      {children}
-    </button>
+    <WithTip title={title} disabled={disabled}>
+      <button
+        type="button"
+        data-tip={title}
+        onClick={onClick}
+        disabled={disabled}
+        style={{
+          width: 30,
+          height: 30,
+          border: 0,
+          borderRadius: 7,
+          cursor: disabled ? 'default' : 'pointer',
+          background: danger ? 'rgba(255,90,90,0.10)' : 'rgba(255,255,255,0.05)',
+          color: danger ? 'rgba(255,140,140,0.85)' : accent ? accent : TOKENS.fgDim,
+          opacity: disabled ? 0.35 : 1,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          transition: 'background .12s, color .12s',
+          pointerEvents: disabled ? 'none' : undefined,
+        }}
+        onMouseEnter={(e) => {
+          if (disabled) return;
+          e.currentTarget.style.background = danger ? 'rgba(255,90,90,0.18)' : 'rgba(255,255,255,0.10)';
+          if (!danger && !accent) e.currentTarget.style.color = TOKENS.fg;
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = danger ? 'rgba(255,90,90,0.10)' : 'rgba(255,255,255,0.05)';
+          if (!danger && !accent) e.currentTarget.style.color = TOKENS.fgDim;
+        }}
+      >
+        {children}
+      </button>
+    </WithTip>
   );
 }
 

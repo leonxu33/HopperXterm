@@ -147,7 +147,7 @@ export function CustomKeysModal({ onClose }: Props) {
                   <Keycap key={i}>{part}</Keycap>
                 ))}
               </span>
-              <code style={{ ...seqInline, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={b.seq}>
+              <code style={{ ...seqInline, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} data-tip={b.seq}>
                 {b.seq}
               </code>
               <span style={{ flexShrink: 0, color: TOKENS.fgMute, fontSize: FS.sm }}>

@@ -10,6 +10,7 @@
 import type { CSSProperties } from 'react';
 import { ICON, FS, TOKENS } from '../../theme';
 import { formatRelative } from '../../lib/format';
+import { WithTip } from '../aurora/primitives';
 import { useAnchoredDismiss } from './useAnchoredDismiss';
 
 type WsEntry = { name: string; tabCount: number; updatedAt: number };
@@ -106,7 +107,7 @@ export function WorkspacesPopover({
               </div>
             </div>
             <button
-              title="Delete"
+              data-tip="Delete"
               onClick={(e) => {
                 e.stopPropagation();
                 onDelete(ws.name);
@@ -136,25 +137,30 @@ export function WorkspacesPopover({
       {onSaveCurrent && (
         <>
           <div style={{ height: 1, margin: '6px 4px', background: TOKENS.border }} />
-          <button
-            onClick={canSave ? onSaveCurrent : undefined}
-            disabled={!canSave}
+          <WithTip
             title={canSave ? undefined : 'Workspaces only store shell sessions — this tab is a file browser (SFTP/FTP/S3)'}
-            style={{
-              ...footerActionStyle,
-              cursor: canSave ? 'pointer' : 'default',
-              opacity: canSave ? 1 : 0.4,
-            }}
-            onMouseEnter={(e) => {
-              if (canSave) e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
-            }}
-            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            disabled={!canSave}
           >
-            <svg width={ICON.sm} height={ICON.sm} viewBox="0 0 16 16" fill="none" style={{ color: TOKENS.accent }}>
-              <path d="M8 3 V13 M3 8 H13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-            </svg>
-            Save current layout…
-          </button>
+            <button
+              onClick={canSave ? onSaveCurrent : undefined}
+              disabled={!canSave}
+              style={{
+                ...footerActionStyle,
+                cursor: canSave ? 'pointer' : 'default',
+                opacity: canSave ? 1 : 0.4,
+                pointerEvents: canSave ? undefined : 'none',
+              }}
+              onMouseEnter={(e) => {
+                if (canSave) e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+              }}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              <svg width={ICON.sm} height={ICON.sm} viewBox="0 0 16 16" fill="none" style={{ color: TOKENS.accent }}>
+                <path d="M8 3 V13 M3 8 H13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+              Save current layout…
+            </button>
+          </WithTip>
         </>
       )}
     </div>

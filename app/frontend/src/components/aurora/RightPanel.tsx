@@ -92,7 +92,7 @@ export function RightPanel({
           cursor: 'col-resize',
           zIndex: 2,
         }}
-        title="Drag to resize"
+        data-tip="Drag to resize"
       />
 
       {/* Header */}
@@ -136,7 +136,7 @@ export function RightPanel({
         <span style={{ flex: 1 }} />
         <button
           onClick={onClose}
-          title="Close panel"
+          data-tip="Close panel"
           style={{
             width: 22,
             height: 22,

@@ -20,6 +20,7 @@ import {
   type ComboOption,
 } from './Modal';
 import { ProtoIcon } from '../aurora/ProtoIcon';
+import { WithTip } from '../aurora/primitives';
 import {
   ListAWSProfiles,
   ListBuckets,
@@ -365,50 +366,53 @@ export function NewSessionModal({
           // nothing and inactive tiles fade so it's obvious they aren't
           // selectable. The active tile keeps its highlight.
           const locked = editing && !active;
+          const lockTip = editing ? "Protocol can't be changed in edit mode" : undefined;
           return (
-            <button
-              key={p.k}
-              disabled={locked}
-              title={editing ? "Protocol can't be changed in edit mode" : undefined}
-              onClick={() => {
-                if (editing) return;
-                onTypeChange(p.k as SessionType);
-              }}
-              style={{
-                appearance: 'none',
-                border: 0,
-                cursor: editing ? (active ? 'default' : 'not-allowed') : 'pointer',
-                padding: '12px 8px 10px',
-                borderRadius: 12,
-                background: active
-                  ? `linear-gradient(180deg, color-mix(in oklch, ${p.color}, transparent 75%) 0%, rgba(255,255,255,0.02) 100%)`
-                  : 'rgba(255,255,255,0.025)',
-                boxShadow: active
-                  ? `inset 0 0 0 1.5px color-mix(in oklch, ${p.color}, transparent 35%), 0 12px 26px -16px ${p.color}`
-                  : `inset 0 0 0 1px ${TOKENS.border}`,
-                color: TOKENS.fg,
-                opacity: locked ? 0.35 : 1,
-                width: 80,
-                minWidth: 80,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 8,
-                transform: active ? 'translateY(-2px)' : 'translateY(0)',
-                transition: 'transform .15s, box-shadow .15s, background .15s, opacity .15s',
-              }}
-            >
-              <ProtoIcon kind={p.k} size={ICON.tile} />
-              <span
+            <WithTip key={p.k} title={lockTip} disabled={locked}>
+              <button
+                disabled={locked}
+                data-tip={lockTip}
+                onClick={() => {
+                  if (editing) return;
+                  onTypeChange(p.k as SessionType);
+                }}
                 style={{
-                  font: `600 ${FS.base}px/1 ${TOKENS.font}`,
-                  color: active ? p.color : TOKENS.fg,
-                  letterSpacing: 0.2,
+                  appearance: 'none',
+                  border: 0,
+                  cursor: editing ? (active ? 'default' : 'not-allowed') : 'pointer',
+                  padding: '12px 8px 10px',
+                  borderRadius: 12,
+                  background: active
+                    ? `linear-gradient(180deg, color-mix(in oklch, ${p.color}, transparent 75%) 0%, rgba(255,255,255,0.02) 100%)`
+                    : 'rgba(255,255,255,0.025)',
+                  boxShadow: active
+                    ? `inset 0 0 0 1.5px color-mix(in oklch, ${p.color}, transparent 35%), 0 12px 26px -16px ${p.color}`
+                    : `inset 0 0 0 1px ${TOKENS.border}`,
+                  color: TOKENS.fg,
+                  opacity: locked ? 0.35 : 1,
+                  width: 80,
+                  minWidth: 80,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: 8,
+                  transform: active ? 'translateY(-2px)' : 'translateY(0)',
+                  transition: 'transform .15s, box-shadow .15s, background .15s, opacity .15s',
+                  pointerEvents: locked ? 'none' : undefined,
                 }}
               >
-                {p.label}
-              </span>
-            </button>
+                <ProtoIcon kind={p.k} size={ICON.tile} />
+                <span
+                  style={{
+                    font: `600 ${FS.base}px/1 ${TOKENS.font}`,
+                    color: active ? p.color : TOKENS.fg,
+                    letterSpacing: 0.2,
+                  }}
+                >
+                  {p.label}
+                </span>
+              </button>
+            </WithTip>
           );
         })}
       </div>

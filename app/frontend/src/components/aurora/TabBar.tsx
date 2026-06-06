@@ -178,7 +178,7 @@ export function TabBar({
                 }
                 clearDrag();
               }}
-              title={!renaming ? `${t.label} · ${t.state || '—'}` : undefined}
+              data-tip={!renaming ? `${t.label} · ${t.state || '—'}` : undefined}
               onMouseDown={(e) => {
                 // Activate on press-down (left button) so the tab switches
                 // immediately rather than waiting for the release.
@@ -251,7 +251,7 @@ export function TabBar({
                   style={closeBtn}
                   onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,.1)')}
                   onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                  title="Close tab"
+                  data-tip="Close tab"
                 >
                   <svg width={ICON.xs} height={ICON.xs} viewBox="0 0 8 8">
                     <path d="M1 1 L7 7 M7 1 L1 7" stroke="currentColor" strokeWidth="1.2" />
@@ -267,7 +267,7 @@ export function TabBar({
         <button
           ref={newBtnRef}
           onClick={onNew}
-          title="New tab"
+          data-tip="New tab"
           style={{
             width: 24,
             height: 24,

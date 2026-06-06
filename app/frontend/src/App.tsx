@@ -54,6 +54,7 @@ import { Sidebar, type Group, type Session } from './components/aurora/Sidebar';
 import { TabBar, type Tab, type PaneState } from './components/aurora/TabBar';
 import { RightPanel, type RightPanelMode } from './components/aurora/RightPanel';
 import { StatusBar } from './components/aurora/StatusBar';
+import { TooltipHost } from './components/aurora/TooltipHost';
 import { hostKeyFor, syncResourceHosts } from './components/aurora/ResourcePanel';
 import { Terminal } from './components/Terminal';
 import { ProtoIcon } from './components/aurora/ProtoIcon';
@@ -1863,7 +1864,7 @@ function App() {
               }}
             >
               <button
-                title="Expand sidebar"
+                data-tip="Expand sidebar"
                 onClick={() => setSidebarCollapsed(false)}
                 style={{
                   appearance: 'none',
@@ -2370,6 +2371,7 @@ function App() {
         />
       )}
       {toast && <Toast key={toast.id} message={toast.message} tone={toast.tone} onDone={() => setToast(null)} />}
+      <TooltipHost />
       {askPwd && (
         <Modal
           title="Password required"

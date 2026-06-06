@@ -84,27 +84,6 @@ export function RenameInput({
   );
 }
 
-// Show a native tooltip with the full text when a cell's content is clipped
-// by the ellipsis. The name cell truncates an inner flex child rather than
-// the cell box itself, so we check the cell and its nowrap descendants. When
-// nothing is clipped the attribute is removed so a row-level title (e.g. a
-// symlink target) still surfaces on hover.
-function cellOverflowTitle(e: React.MouseEvent<HTMLDivElement>) {
-  const cell = e.currentTarget;
-  // scrollWidth (full content) exceeds clientWidth (visible box) by exactly 0
-  // when the text fits and >=1 the moment the ellipsis kicks in — no tolerance
-  // fudge, or sub-pixel truncations near a char boundary get missed. The name
-  // cell clips an inner flex <span> rather than the cell box, so scan spans too
-  // (the icon <svg> is skipped, which would otherwise muddy the comparison).
-  const clipped =
-    cell.scrollWidth > cell.clientWidth ||
-    Array.from(cell.querySelectorAll<HTMLElement>('span')).some(
-      (el) => el.scrollWidth > el.clientWidth,
-    );
-  if (clipped) cell.title = cell.textContent ?? '';
-  else cell.removeAttribute('title');
-}
-
 export type ColDef<K extends string> = {
   k: K;
   label: string;
@@ -357,7 +336,7 @@ export function FileTable<K extends string>({
               <div
                 onMouseDown={beginColResize(col.k)}
                 onClick={(e) => e.stopPropagation()}
-                title="Drag to resize"
+                data-tip="Drag to resize"
                 style={{ position: 'absolute', right: -3, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 3 }}
                 onMouseEnter={(e) => {
                   const inner = e.currentTarget.firstElementChild as HTMLElement;
@@ -402,7 +381,7 @@ export function FileTable<K extends string>({
               onMouseDown={(e) => onRowMouseDown(e, r.name)}
               onDoubleClick={() => onRowDouble(r)}
               onContextMenu={onRowContext ? (e) => onRowContext(e, r.name) : undefined}
-              title={rowTitle ? rowTitle(r) : undefined}
+              data-tip={(rowTitle ? rowTitle(r) : undefined) || undefined}
               draggable={draggableRows || undefined}
               onDragStart={onRowDragStart ? (e) => onRowDragStart(e, r) : undefined}
               onDragOver={onRowDrop ? (e) => e.preventDefault() : undefined}
@@ -431,7 +410,7 @@ export function FileTable<K extends string>({
               {cols.map((col, ci) => (
                 <div
                   key={col.k}
-                  onMouseEnter={cellOverflowTitle}
+                  data-tip-overflow=""
                   style={{
                     boxSizing: 'border-box',
                     width: colWidths[col.k],

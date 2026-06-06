@@ -65,7 +65,7 @@ export function AboutModal({ onClose }: { onClose: () => void }) {
       </div>
       <div style={metaRow}>
         <span style={metaLabel}>Source</span>
-        <button type="button" onClick={openRepo} style={linkBtn} title="Open in browser">
+        <button type="button" onClick={openRepo} style={linkBtn} data-tip="Open in browser">
           github.com/leonxu33/HopperXterm
         </button>
       </div>

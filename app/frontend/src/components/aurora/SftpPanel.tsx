@@ -27,7 +27,7 @@ import {
   LocalIsDir,
 } from '../../../wailsjs/go/main/App';
 import { EventsOn, OnFileDrop, OnFileDropOff } from '../../../wailsjs/runtime/runtime';
-import { IconBtn, ContextMenu } from './primitives';
+import { IconBtn, ContextMenu, WithTip } from './primitives';
 import type { ContextMenuItem } from './primitives';
 import { runWithConcurrency } from '../../lib/concurrency';
 import { type Entry, sortRows, formatSize, formatDate, formatMode, withParentRow, isExec } from '../../lib/fileBrowser';
@@ -893,7 +893,7 @@ export function SftpPanel({ paneId, paneState }: Props) {
           <span style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>{err}</span>
           <button
             type="button"
-            title="Dismiss"
+            data-tip="Dismiss"
             onClick={() => setErr(null)}
             style={{
               flex: '0 0 auto',
@@ -1105,7 +1105,7 @@ export function SftpPanel({ paneId, paneState }: Props) {
                     {t.kind === 'upload' ? '↑' : '↓'}
                   </span>
                   <span
-                    title={t.path}
+                    data-tip={t.path}
                     style={{
                       flex: '1 1 auto',
                       minWidth: 0,
@@ -1120,7 +1120,7 @@ export function SftpPanel({ paneId, paneState }: Props) {
                   </span>
                   <button
                     type="button"
-                    title={t.state === 'running' ? 'Cancel' : 'Dismiss'}
+                    data-tip={t.state === 'running' ? 'Cancel' : 'Dismiss'}
                     onClick={() => {
                       if (t.state === 'running') void CancelSftpTransfer(t.id);
                       else dismissTransfer(t.id);
@@ -1274,19 +1274,19 @@ function FollowTermToggle({
   disabled?: boolean;
   onChange: (v: boolean) => void;
 }) {
+  const tip = disabled
+    ? 'Follow terminal folder needs a POSIX shell (bash/zsh) — not available on Windows hosts'
+    : on
+      ? 'Click to stop following the terminal CWD'
+      : 'Sync this view to the terminal CWD (requires OSC 7)';
   return (
+    <WithTip title={tip} disabled={disabled} block>
     <button
       onClick={() => {
         if (!disabled) onChange(!on);
       }}
       disabled={disabled}
-      title={
-        disabled
-          ? 'Follow terminal folder needs a POSIX shell (bash/zsh) — not available on Windows hosts'
-          : on
-            ? 'Click to stop following the terminal CWD'
-            : 'Sync this view to the terminal CWD (requires OSC 7)'
-      }
+      data-tip={tip}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -1301,6 +1301,7 @@ function FollowTermToggle({
         borderTop: `1px solid ${TOKENS.border}`,
         flex: '0 0 auto',
         textAlign: 'left',
+        pointerEvents: disabled ? 'none' : undefined,
       }}
       onMouseEnter={(e) => {
         if (!on && !disabled) e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
@@ -1335,6 +1336,7 @@ function FollowTermToggle({
       </span>
       <span style={{ flex: 1 }}>Follow terminal folder</span>
     </button>
+    </WithTip>
   );
 }
 

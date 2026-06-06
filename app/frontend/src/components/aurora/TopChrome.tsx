@@ -110,7 +110,7 @@ function CtrlButton({
 }) {
   return (
     <button
-      title={title}
+      data-tip={title}
       onClick={onClick}
       style={{
         width: 30,
@@ -285,7 +285,7 @@ export function TopChrome({
       <button
         ref={settingsRef}
         onClick={onSettings}
-        title="Settings"
+        data-tip="Settings"
         style={{
           width: 30,
           height: 30,

@@ -119,7 +119,7 @@ export function TerminalSearch({ addon, onClose, focusTick, onFocusTerminal }: P
 
 function Toggle({ label, title, on, onClick }: { label: string; title: string; on: boolean; onClick: () => void }) {
   return (
-    <button title={title} onClick={onClick} style={toggleBtn(on)}>
+    <button data-tip={title} onClick={onClick} style={toggleBtn(on)}>
       {label}
     </button>
   );
