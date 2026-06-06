@@ -1638,9 +1638,6 @@ function App() {
   // shell and WSL are terminal panes with no remote to browse or poll, so
   // both buttons are disabled (and the panel auto-closes) for them too.
   const activeHasRemotePanel = !!activeHostKey;
-  const remotePanelDisabledReason = activeIsFileOnly
-    ? 'this pane is already a file browser'
-    : 'not available for local sessions';
   useEffect(() => {
     if (!activeHasRemotePanel && rightOpen) setRightOpen(false);
   }, [activeHasRemotePanel, rightOpen]);
@@ -2016,7 +2013,7 @@ function App() {
                 </svg>
               </ToolBtn>
               <ToolBtn
-                title={activeHasRemotePanel ? 'Toggle SFTP' : `Remote files (${remotePanelDisabledReason})`}
+                title="Remote files"
                 active={rightOpen && rightMode === 'sftp'}
                 disabled={!activeHasRemotePanel}
                 onClick={() => {
@@ -2032,7 +2029,7 @@ function App() {
                 </svg>
               </ToolBtn>
               <ToolBtn
-                title={activeHasRemotePanel ? 'Resource monitor' : `Resource monitor (${remotePanelDisabledReason})`}
+                title="Resource monitor"
                 active={rightOpen && rightMode === 'resources'}
                 disabled={!activeHasRemotePanel}
                 onClick={() => {

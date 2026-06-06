@@ -100,10 +100,10 @@ function RegionProfileFields({
 }) {
   return (
     <>
-      <Field label="Region" hint="pick or type">
+      <Field label="Region">
         <Combo value={region} onChange={setRegion} options={AWS_REGIONS} placeholder="us-east-1" onKeyDown={onEnter} />
       </Field>
-      <Field label="AWS profile" hint="from ~/.aws · blank = default">
+      <Field label="AWS profile" hint="from ~/.aws">
         <Combo value={awsProfile} onChange={setAwsProfile} options={awsProfiles} placeholder="default" onKeyDown={onEnter} />
       </Field>
     </>
@@ -228,12 +228,12 @@ export function NewSessionModal({
     ? 'loading buckets…'
     : s3List.error
       ? "couldn't list — type the name"
-      : 'pick or type · no s3:// prefix';
+      : undefined;
   const instanceHint = ec2List.loading
     ? 'loading instances…'
     : ec2List.error
       ? "couldn't list — type the id"
-      : 'pick or type';
+      : undefined;
   const [startupCmds, setStartupCmds] = useState(existing?.startupCmds ?? '');
   const [showStartup, setShowStartup] = useState(!!existing?.startupCmds?.trim());
   // In edit mode we want to show the saved label verbatim (so the user
@@ -330,7 +330,7 @@ export function NewSessionModal({
       subtitle={
         editing
           ? 'Change protocol, host, credentials, or label.'
-          : 'Pick a protocol, attach to a group, and connect.'
+          : 'Choose a protocol and enter the connection details.'
       }
       onClose={onCancel}
       onSubmit={submit}
@@ -456,7 +456,7 @@ export function NewSessionModal({
         {err && <div style={errBox}>{err}</div>}
 
         {/* Session name — always full width */}
-        <Field label="Session name" hint="Auto-derived if blank.">
+        <Field label="Session name">
           <TextInput
             value={label}
             onChange={setLabel}
@@ -500,7 +500,7 @@ export function NewSessionModal({
       )}
 
       {type === 'wsl' && (
-        <Field label="Distro" hint={wslDistros.length ? 'pick or type · blank = default' : 'e.g. Ubuntu-22.04'}>
+        <Field label="Distro" hint={wslDistros.length ? undefined : 'e.g. Ubuntu-22.04'}>
           <Combo
             value={distro}
             onChange={setDistro}
@@ -554,7 +554,7 @@ export function NewSessionModal({
               onKeyDown={onEnter}
             />
           </Field>
-          <Field label="SSH user" hint="ec2-user / ubuntu / admin">
+          <Field label="SSH user">
             <TextInput
               value={user}
               onChange={setUser}

@@ -82,7 +82,7 @@ export function RecordMacroModal({ onCancel, onSave }: Props) {
   return (
     <Modal
       title="Record macro"
-      subtitle="Type your keystrokes below — no connection needed"
+      subtitle="Type your keystrokes below"
       blockOutsideClose
       onClose={onCancel}
       onSubmit={submit}

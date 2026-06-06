@@ -265,7 +265,7 @@ export function TopChrome({
             <path d="M10.5 10.5 L14 14" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
           </svg>
           <span style={{ flex: 1, textAlign: 'left' }}>
-            Quick connect — host, server, or command…
+            Quick connect
           </span>
           <span
             style={{
