@@ -1,11 +1,13 @@
-// ShortcutsOverlay — transient full-screen cheat-sheet shown while F1 is held
-// (App owns the hold/release state and mounts this only while held). Read-only
-// and pointer-transparent: it's dismissed by releasing F1, never clicked, so
-// it must not steal focus or intercept mouse events. Laid out in balanced CSS
-// columns sized to the viewport so every shortcut fits without scrolling.
+// ShortcutsOverlay — transient full-screen cheat-sheet (App owns the open
+// state and mounts this only while open). On Windows/macOS it's shown while F1
+// is held; on Linux F1 toggles it (X11 auto-repeat breaks hold-to-peek — see
+// the F1 handler in App.tsx). Read-only and pointer-transparent: it's dismissed
+// via the keyboard (release F1 / press F1 or Esc), never clicked, so it must
+// not steal focus or intercept mouse events. Laid out in balanced CSS columns
+// sized to the viewport so every shortcut fits without scrolling.
 import { createPortal } from 'react-dom';
 import { FS, TOKENS } from '../../theme';
-import { KEYBOARD_ICON, SHORTCUT_SECTIONS, SectionBlock } from './shortcutsData';
+import { KEYBOARD_ICON, f1HelpText, getShortcutSections, SectionBlock } from './shortcutsData';
 
 export function ShortcutsOverlay() {
   return createPortal(
@@ -46,14 +48,14 @@ export function ShortcutsOverlay() {
             Keyboard shortcuts
           </span>
           <span style={{ marginLeft: 'auto', fontSize: FS.sm, color: TOKENS.fgMute }}>
-            Release F1 to dismiss
+            {f1HelpText().dismiss}
           </span>
         </div>
 
         {/* Balanced multi-column flow; SectionBlock sets break-inside:avoid so
             a section never splits across the column gap. */}
         <div style={{ columns: 2, columnGap: 40 }}>
-          {SHORTCUT_SECTIONS.map((section) => (
+          {getShortcutSections().map((section) => (
             <SectionBlock key={section.title} section={section} />
           ))}
         </div>

@@ -48,7 +48,7 @@ import {
   ResolveHostKeyChange,
 } from '../wailsjs/go/main/App';
 import { EventsOn, WindowFullscreen, WindowUnfullscreen } from '../wailsjs/runtime/runtime';
-import { isMac } from './lib/platform';
+import { isLinux, isMac } from './lib/platform';
 import { initUIPrefs } from './lib/uiprefs';
 import { AuroraFrame } from './components/aurora/AuroraFrame';
 import { TopChrome } from './components/aurora/TopChrome';
@@ -1565,15 +1565,38 @@ function App() {
   }, [tabs, activeTabId, activePaneByTab, selectedSessionId, deleteSessionConfirm, splitPane, closePane, toggleFullscreen]);
 
   useEffect(() => {
+    // F1 shows the shortcut cheat-sheet. Two interaction models, by platform:
+    //
+    //   • Windows / macOS — hold-to-peek: keydown shows, keyup hides. Held keys
+    //     repeat keydown with no intervening keyup there, so this is reliable.
+    //   • Linux — toggle: press to open, press again (or Esc) to dismiss.
+    //
+    // Linux can't use hold-to-peek: on X11 a held key auto-repeats as phantom
+    // keyup→keydown pairs (a synthetic release fires right before each repeat),
+    // and the gap before the first repeat (the auto-repeat *delay*, ~250-500ms)
+    // is long enough that any reasonable keyup debounce fires in it — the
+    // overlay flickers open→closed before auto-repeat starts holding it open.
+    // A toggle sidesteps the keyup entirely.
     const onKey = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
       if (e.key === 'F1') {
-        // Hold F1 to flash the shortcut cheat-sheet; released in onKeyUp.
-        // keydown auto-repeats while held — setHelpOverlay(true) is idempotent.
         e.preventDefault();
         e.stopPropagation();
-        setHelpOverlay(true);
+        if (isLinux()) {
+          // Toggle. e.repeat guards against an auto-repeat keydown flipping it
+          // back closed while the key is still held.
+          if (!e.repeat) setHelpOverlay((v) => !v);
+        } else {
+          // Hold-to-peek: keydown auto-repeats while held — setHelpOverlay(true)
+          // is idempotent; released in onKeyUp.
+          setHelpOverlay(true);
+        }
         return;
+      }
+      if (e.key === 'Escape' && isLinux()) {
+        // Dismiss the toggle-mode overlay. No preventDefault/return — Esc must
+        // still reach modals and the terminal when the overlay isn't open.
+        setHelpOverlay(false);
       }
       if (e.key === 'F11' || (isMac() && e.ctrlKey && e.metaKey && k === 'f')) {
         // Toggle full-screen mode (OS window + chrome strip). F11 is the
@@ -1700,11 +1723,13 @@ function App() {
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key === 'F1') setHelpOverlay(false);
+      // Hold-to-peek release (Windows/macOS). Linux toggles, so it ignores
+      // keyup (the phantom X11 releases are exactly why — see above).
+      if (e.key === 'F1' && !isLinux()) setHelpOverlay(false);
     };
-    // If the window loses focus while F1 is held, the keyup may never arrive
-    // (it fires on whatever has focus next) — hide the overlay so it can't
-    // stick open.
+    // Hide on focus loss: in hold-to-peek the keyup may never arrive if focus
+    // moves away while F1 is held (it fires on whatever has focus next), and in
+    // toggle mode an alt-tab-away should drop the overlay too.
     const onBlur = () => setHelpOverlay(false);
     document.addEventListener('keydown', onKey, true);
     document.addEventListener('keyup', onKeyUp, true);

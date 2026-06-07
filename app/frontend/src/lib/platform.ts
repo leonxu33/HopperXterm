@@ -27,6 +27,7 @@ try {
 
 export const hostPlatform = () => platform;
 export const isMac = () => platform === 'darwin';
+export const isLinux = () => platform === 'linux';
 
 /** WSL exists only on Windows. Permissive while the probe hasn't resolved
  *  ('' — sub-millisecond at startup) so a Windows host never momentarily

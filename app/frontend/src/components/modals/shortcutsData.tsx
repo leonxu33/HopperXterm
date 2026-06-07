@@ -5,7 +5,7 @@
 // handler, terminal chords in Terminal.tsx's attachCustomKeyEventHandler.
 import type { CSSProperties } from 'react';
 import { FS, TOKENS } from '../../theme';
-import { isMac } from '../../lib/platform';
+import { isLinux, isMac } from '../../lib/platform';
 
 // `combos` is what most platforms use. `macCombos`, when present, replaces it
 // on macOS — for the few bindings that genuinely differ there (e.g. F11 is
@@ -14,14 +14,37 @@ import { isMac } from '../../lib/platform';
 export type Shortcut = { combos: string[]; macCombos?: string[]; desc: string };
 export type ShortcutSection = { title: string; items: Shortcut[] };
 
-export const SHORTCUT_SECTIONS: ShortcutSection[] = [
+// Single source for the F1-overlay help wording — the F1 row description, the
+// Settings-modal tip, and the overlay's dismiss footer all describe the same
+// behavior and must stay in sync. It differs by platform: Linux toggles F1
+// (X11 auto-repeat breaks hold-to-peek — see App.tsx's F1 handler), Windows /
+// macOS hold. The platform probe resolves within ms of startup, well before
+// this is ever read, so evaluating at call time is safe.
+export const f1HelpText = () =>
+  isLinux()
+    ? {
+        rowDesc: 'Press to toggle this help',
+        tip: 'Tip: press F1 anywhere to toggle this list',
+        dismiss: 'Press F1 or Esc to dismiss',
+      }
+    : {
+        rowDesc: 'Hold to show this help',
+        tip: 'Tip: hold F1 anywhere to flash this list',
+        dismiss: 'Release F1 to dismiss',
+      };
+
+// Built at call time (not a module const) so the F1 row reflects the resolved
+// host platform (see f1HelpText). The probe resolves within ms of startup,
+// well before this is ever rendered.
+export function getShortcutSections(): ShortcutSection[] {
+  return [
   {
     title: 'General',
     items: [
       { combos: ['Ctrl+Shift+N'], desc: 'New session' },
       { combos: ['Ctrl+P'], macCombos: ['Cmd+P'], desc: 'Command palette' },
       { combos: ['F11'], macCombos: ['Ctrl+Cmd+F'], desc: 'Toggle full-screen (tabs + panes only)' },
-      { combos: ['F1'], desc: 'Hold to show this help' },
+      { combos: ['F1'], desc: f1HelpText().rowDesc },
       { combos: ['Delete'], desc: 'Delete selected session (sidebar)' },
     ],
   },
@@ -58,7 +81,8 @@ export const SHORTCUT_SECTIONS: ShortcutSection[] = [
       { combos: ['R'], desc: 'Reconnect a disconnected pane' },
     ],
   },
-];
+  ];
+}
 
 // The keyboard-glyph icon shared by the Settings row, the modal, and the overlay.
 export const KEYBOARD_ICON = (
