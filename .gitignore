@@ -43,7 +43,7 @@ desktop.ini
 *.local
 
 # Docs (handoff materials, design bundle) — not part of the repo
-docs/
+dev-docs/
 
 # Project context for Claude — local only
 CLAUDE.md
