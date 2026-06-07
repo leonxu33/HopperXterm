@@ -11,6 +11,12 @@ app/frontend/package.json.md5
 app/frontend/coverage/
 app/cover.out
 
+# Playwright E2E artifacts
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # Dependencies
 node_modules/
 
