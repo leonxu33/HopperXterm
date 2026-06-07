@@ -2,8 +2,12 @@
 // CheckForUpdates() (GitHub Releases) on open and shows one of: checking /
 // up-to-date / update available / dev build / error. When an update is
 // available with an installer for this platform, the user can download + apply
-// it: on Windows the installer runs silently and the app restarts itself; on
-// macOS the .dmg is opened to drag over (detected from the asset extension).
+// it in place — all three desktop OSes then quit and relaunch: Windows runs the
+// NSIS installer silently, macOS replaces the .app bundle, Linux replaces the
+// running .AppImage.
+// "View release" (opens the latest GitHub release page) is offered in every
+// non-dev result — including up-to-date — so the user can always read the notes
+// or grab assets manually.
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ICON, FS, TOKENS } from '../../theme';
@@ -125,6 +129,18 @@ export function UpdateModal({ onClose }: { onClose: () => void }) {
           <PrimaryButton onClick={openRelease} kbd={null} autoFocus>
             View release
           </PrimaryButton>
+        </>
+      );
+    } else if (!info.dev && info.releaseUrl) {
+      // Up to date — still let the user open the latest release page (notes,
+      // assets, manual download). Dev builds skip this (no release fetched).
+      footer = (
+        <>
+          <GhostButton onClick={onClose}>Close</GhostButton>
+          <div style={{ flex: 1 }} />
+          <GhostButton onClick={openRelease} kbd={null}>
+            View release
+          </GhostButton>
         </>
       );
     }

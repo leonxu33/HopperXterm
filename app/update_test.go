@@ -28,6 +28,26 @@ func TestIsNewerVersion(t *testing.T) {
 	}
 }
 
+func TestPlatformAssetSuffix(t *testing.T) {
+	cases := []struct {
+		goos, goarch string
+		want         string
+	}{
+		{"windows", "amd64", "-windows-amd64.exe"},
+		{"darwin", "amd64", "-macos-universal.dmg"},
+		{"darwin", "arm64", "-macos-universal.dmg"}, // universal — arch-agnostic
+		{"linux", "amd64", "-linux-amd64.appimage"},
+		{"linux", "arm64", "-linux-aarch64.appimage"}, // arm64 → aarch64 slug
+		{"freebsd", "amd64", ""},                      // no packaged installer
+		{"openbsd", "arm64", ""},
+	}
+	for _, c := range cases {
+		if got := platformAssetSuffix(c.goos, c.goarch); got != c.want {
+			t.Errorf("platformAssetSuffix(%q, %q) = %q, want %q", c.goos, c.goarch, got, c.want)
+		}
+	}
+}
+
 func TestPickPlatformAsset(t *testing.T) {
 	assets := []ghAsset{
 		{Name: "HopperXterm-1.2.0-windows-amd64.exe", BrowserDownloadURL: "u-win"},

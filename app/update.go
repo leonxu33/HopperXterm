@@ -1,15 +1,17 @@
 package main
 
-// Self-update: check GitHub Releases for a newer version and (Windows) install
-// it silently in place, or (macOS) download and open the .dmg for the user to
-// drag over. Manual-only — triggered from Settings → Check for updates. There
-// is no background/auto check.
+// Self-update: check GitHub Releases for a newer version and install it in
+// place — Windows runs the NSIS installer silently, macOS replaces the .app
+// bundle, Linux replaces the running .AppImage. All three quit + relaunch.
+// Manual-only — triggered from Settings → Check for updates. There is no
+// background/auto check.
 //
 // The version, release tag, and installer asset names all derive from
 // info.productVersion in wails.json (see app.go AppVersion + the release
 // skill's naming scheme), so this stays in sync with what `release` publishes:
 //   HopperXterm-<version>-windows-amd64.exe
 //   HopperXterm-<version>-macos-universal.dmg
+//   HopperXterm-<version>-linux-<arch>.AppImage   (<arch> = amd64 | aarch64)
 
 import (
 	"context"
@@ -192,16 +194,38 @@ func fetchLatestRelease(ctx context.Context) (*ghRelease, error) {
 	return &rel, nil
 }
 
+// platformAssetSuffix returns the (lowercase) release-asset filename suffix for
+// the given OS/arch per the naming scheme the `release` skill publishes, or ""
+// for a platform with no packaged installer. Split out from pickPlatformAsset
+// so the per-platform mapping (notably the linux arm64→aarch64 slug) is unit-
+// testable without depending on the test host's GOOS/GOARCH.
+func platformAssetSuffix(goos, goarch string) string {
+	switch goos {
+	case "windows":
+		return "-windows-amd64.exe"
+	case "darwin":
+		return "-macos-universal.dmg"
+	case "linux":
+		// Arch-specific AppImage (see scripts/build_linux_installer.sh). Use the
+		// "aarch64" slug for arm64 so it can't be misread as "amd64". The
+		// in-place apply only works when running FROM an AppImage (the helper
+		// replaces $APPIMAGE); a bare-binary build that downloads this will get
+		// a clear "not an AppImage" error from launchUpdateInstaller instead.
+		arch := goarch // "amd64"
+		if arch == "arm64" {
+			arch = "aarch64"
+		}
+		return "-linux-" + arch + ".appimage"
+	default:
+		return "" // no packaged installer for this platform
+	}
+}
+
 // pickPlatformAsset returns the installer asset matching the running OS/arch
 // per the release naming scheme, or nil if none is present.
 func pickPlatformAsset(assets []ghAsset) *ghAsset {
-	var suffix string
-	switch runtime.GOOS {
-	case "windows":
-		suffix = "-windows-amd64.exe"
-	case "darwin":
-		suffix = "-macos-universal.dmg"
-	default:
+	suffix := platformAssetSuffix(runtime.GOOS, runtime.GOARCH)
+	if suffix == "" {
 		return nil // no packaged installer for this platform
 	}
 	for i := range assets {
