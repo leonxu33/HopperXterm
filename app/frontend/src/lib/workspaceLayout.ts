@@ -3,13 +3,52 @@
 // regenerated on load) and is migrated from the legacy column-major shape
 // when an old workspace is opened.
 import { normalize, type PaneNode, type PaneLayout } from '../components/aurora/PaneGrid';
+import { isPanelKind, type PanelKind, type PanelNode } from './panels';
+
+/** Serialized inner panel arrangement (mirrors PanelNode; a leaf's `panel`
+ *  field is the PanelKind that the live tree stores as the leaf id). */
+export type WsPanelNode =
+  | { kind: 'leaf'; panel: PanelKind; weight: number }
+  | { kind: 'split'; dir: 'row' | 'col'; weight: number; children: WsPanelNode[] };
 
 /** Serialized pane layout: the split tree without backend pane ids. Mirrors
  *  PaneNode but leaves carry only sessionId (plus an optional saved cwd that
- *  workspace restore cd's the reopened shell back into). */
+ *  workspace restore cd's the reopened shell back into, and an optional inner
+ *  panel arrangement — absent means the default single primary panel). */
 export type WsNode =
-  | { kind: 'leaf'; sessionId: string; weight: number; cwd?: string }
+  | { kind: 'leaf'; sessionId: string; weight: number; cwd?: string; panels?: WsPanelNode }
   | { kind: 'split'; dir: 'row' | 'col'; weight: number; children: WsNode[] };
+
+/** Strip the live panel tree's ids (they ARE the kinds) into the serialized
+ *  form. Returns undefined for a falsy/blank tree so callers can omit it. */
+function panelsToWs(node: PanelNode | undefined): WsPanelNode | undefined {
+  if (!node) return undefined;
+  if (node.kind === 'leaf') {
+    if (!isPanelKind(node.id)) return undefined;
+    return { kind: 'leaf', panel: node.id, weight: node.weight };
+  }
+  return {
+    kind: 'split',
+    dir: node.dir,
+    weight: node.weight,
+    children: node.children
+      .map((c) => panelsToWs(c))
+      .filter((c): c is WsPanelNode => c !== undefined),
+  };
+}
+
+/** Rebuild a live panel tree (leaf id = kind) from the serialized form. */
+function wsToPanels(node: WsPanelNode): PanelNode {
+  if (node.kind === 'leaf') {
+    return { kind: 'leaf', id: node.panel, weight: node.weight || 1 };
+  }
+  return {
+    kind: 'split',
+    dir: node.dir,
+    weight: node.weight || 1,
+    children: node.children.map(wsToPanels),
+  };
+}
 
 /** Legacy (pre-split-tree) column-major shape, still present in old
  *  workspaces.json files; migrated to a tree on load. */
@@ -23,7 +62,16 @@ export type LegacyColumn = { weight: number; cells: LegacyCell[] };
 export function toWsNode(node: PaneNode, cwdFor?: (paneId: string) => string | undefined): WsNode {
   if (node.kind === 'leaf') {
     const cwd = cwdFor?.(node.id);
-    return { kind: 'leaf', sessionId: node.sessionId, weight: node.weight, ...(cwd ? { cwd } : {}) };
+    // Only customized panes carry a `panels` tree (leaf.panels stays undefined
+    // until the user adds/moves/resizes a panel), so most leaves omit it.
+    const panels = panelsToWs(node.panels);
+    return {
+      kind: 'leaf',
+      sessionId: node.sessionId,
+      weight: node.weight,
+      ...(cwd ? { cwd } : {}),
+      ...(panels ? { panels } : {}),
+    };
   }
   return { kind: 'split', dir: node.dir, weight: node.weight, children: node.children.map((c) => toWsNode(c, cwdFor)) };
 }
@@ -39,7 +87,13 @@ export function wsNodeToLayout(
   if (node.kind === 'leaf') {
     const id = mkId();
     if (onLeaf && node.cwd) onLeaf(id, node.cwd);
-    return { kind: 'leaf', id, sessionId: node.sessionId, weight: node.weight || 1 };
+    return {
+      kind: 'leaf',
+      id,
+      sessionId: node.sessionId,
+      weight: node.weight || 1,
+      ...(node.panels ? { panels: wsToPanels(node.panels) } : {}),
+    };
   }
   return {
     kind: 'split',

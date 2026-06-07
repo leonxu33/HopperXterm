@@ -84,6 +84,16 @@ const paneCwdCache = new Map<string, string>();
 // component-level state leaking across panes of the same session).
 const paneFollowCache = new Map<string, boolean>();
 
+/** True for HopperXterm's own drag payloads (panel / pane / session moves) —
+ *  these are layout rearrangements, not OS file uploads, so the file panel's
+ *  upload overlay must ignore them. */
+function isInternalDrag(e: React.DragEvent): boolean {
+  for (const t of e.dataTransfer.types) {
+    if (t.startsWith('application/x-hopper-')) return true;
+  }
+  return false;
+}
+
 export function SftpPanel({ paneId, paneState }: Props) {
   const [cwd, setCwd] = useState('');
   const [draftPath, setDraftPath] = useState('');
@@ -921,11 +931,18 @@ export function SftpPanel({ paneId, paneState }: Props) {
 
       <div
         onDragEnter={(e) => {
+          // Internal panel/pane/session drags aren't file uploads — let them
+          // pass through to the pane's panel-rearrange handler instead of
+          // flashing the "Drop to upload" overlay.
+          if (isInternalDrag(e)) return;
           e.preventDefault();
           dragDepth.current += 1;
           setDragOver(true);
         }}
-        onDragOver={(e) => e.preventDefault()}
+        onDragOver={(e) => {
+          if (isInternalDrag(e)) return;
+          e.preventDefault();
+        }}
         onDragLeave={() => {
           dragDepth.current = Math.max(0, dragDepth.current - 1);
           if (dragDepth.current === 0) setDragOver(false);

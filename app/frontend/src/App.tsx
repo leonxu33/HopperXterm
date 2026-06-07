@@ -1,5 +1,5 @@
 // Aurora layout — multi-tab + multi-pane.
-// Flat full-bleed layout: sidebar | resizer | (tab-row + pane-area + right-panel) | statusbar
+// Flat full-bleed layout: sidebar | resizer | (tab-row + pane-area) | statusbar
 // All inside one edge-to-edge container that fills the window below the title
 // bar (no floating island). The sidebar runs the full height; the status bar
 // lives in the right column so it starts at the sidebar's right edge.
@@ -54,10 +54,19 @@ import { AuroraFrame } from './components/aurora/AuroraFrame';
 import { TopChrome } from './components/aurora/TopChrome';
 import { Sidebar, type Group, type Session } from './components/aurora/Sidebar';
 import { TabBar, type Tab, type PaneState } from './components/aurora/TabBar';
-import { RightPanel, type RightPanelMode } from './components/aurora/RightPanel';
 import { StatusBar } from './components/aurora/StatusBar';
 import { TooltipHost } from './components/aurora/TooltipHost';
-import { hostKeyFor, syncResourceHosts } from './components/aurora/ResourcePanel';
+import { hostKeyFor, syncResourceHosts, ResourcePanel } from './components/aurora/ResourcePanel';
+import {
+  addPanel,
+  availablePanels,
+  defaultPanelLayout,
+  hasPanel,
+  isSshBacked,
+  removePanel,
+  type PanelKind,
+  type PanelNode,
+} from './lib/panels';
 import { Terminal } from './components/Terminal';
 import { ProtoIcon } from './components/aurora/ProtoIcon';
 import { SftpPanel } from './components/aurora/SftpPanel';
@@ -86,6 +95,7 @@ import {
   appendLeaf,
   moveLeaf,
   splitActive,
+  updateLeaf,
   type PaneLayout,
   type PaneLeaf,
   type DropZone,
@@ -208,23 +218,10 @@ function App() {
   const [paneStates, setPaneStates] = useState<PaneStates>({});
   const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
 
-  // Right panel — open state + mode are kept per tab so switching tabs
-  // (and back) preserves whether the Remote Files / Resource Monitor
-  // panel was open and which one was showing.
-  const [rightByTab, setRightByTab] = useState<Record<string, { open: boolean; mode: RightPanelMode }>>({});
-  const rightState = activeTabId ? rightByTab[activeTabId] : undefined;
-  const rightOpen = rightState?.open ?? false;
-  const rightMode: RightPanelMode = rightState?.mode ?? 'sftp';
-  const patchRight = (patch: Partial<{ open: boolean; mode: RightPanelMode }>) => {
-    if (!activeTabId) return;
-    setRightByTab((cur) => {
-      const prev = cur[activeTabId] ?? { open: false, mode: 'sftp' as RightPanelMode };
-      return { ...cur, [activeTabId]: { ...prev, ...patch } };
-    });
-  };
-  const setRightOpen = (open: boolean) => patchRight({ open });
-  const setRightMode = (mode: RightPanelMode) => patchRight({ mode });
-  const [rightWidth, setRightWidth] = useState<number>(TOKENS.rightPanelWidth);
+  // The Resource Monitor / Remote Files views now live INSIDE panes as
+  // draggable panels (see lib/panels + PaneComposite); the old right-edge
+  // dock has been retired. The tab-row buttons toggle these panels in the
+  // active pane (see toggleActivePanePanel).
   const [sidebarWidth, setSidebarWidth] = useState<number>(TOKENS.sidebarWidth);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
 
@@ -1134,6 +1131,19 @@ function App() {
     if (nextActive) focusPaneTerminal(nextActive);
   };
 
+  // Persist a pane's inner panel arrangement (add/remove/resize/move panels).
+  // The panels tree rides on the pane leaf's payload; updateLeaf rewrites just
+  // that leaf, leaving the surrounding pane layout untouched.
+  const setPanePanels = (tabId: string, paneId: string, panels: PanelNode) => {
+    setTabs((cur) =>
+      cur.map((t) =>
+        t.id === tabId
+          ? { ...t, layout: updateLeaf(t.layout, paneId, (l) => ({ ...l, panels })) }
+          : t,
+      ),
+    );
+  };
+
   // Reload a single pane: swap that one cell for a fresh pane id on the same
   // session and reconnect, mirroring reloadTab's rebuild but scoped to one
   // cell. The new id remounts the Terminal so the screen resets cleanly
@@ -1178,7 +1188,9 @@ function App() {
       if (paneCount(source.layout) + paneCount(target.layout) > PANE_LIMIT) return cur;
       let layout = target.layout;
       for (const c of paneLeaves(source.layout)) {
-        layout = appendLeaf(layout, { kind: 'leaf', id: c.id, sessionId: c.sessionId, weight: 1 });
+        // Spread the whole leaf (not just id/sessionId) so its inner panel
+        // arrangement travels with the pane into the merged tab.
+        layout = appendLeaf(layout, { ...c, weight: 1 });
       }
       const next = cur
         .map((t) => (t.id === target.id ? { ...t, layout } : t))
@@ -1215,7 +1227,9 @@ function App() {
       type: s?.type || 'shell',
       label: s?.label || s?.host || 'session',
       state: paneStates[paneId] || null,
-      layout: singleLeafLayout(paneId, leaf.sessionId),
+      // Spread the whole leaf so the pane's inner panel arrangement detaches
+      // with it (id stays paneId — same backend connection).
+      layout: { ...leaf, weight: 1 },
       isFileTab: isFileOnly(s?.type),
     };
     setTabs((cur) =>
@@ -1937,17 +1951,33 @@ function App() {
   const activeSession = activePaneSessionId ? sessionById(activePaneSessionId) || null : null;
   const activePaneState = activePaneId ? paneStates[activePaneId] || null : null;
   const activeHostKey = hostKeyFor(activeSession);
-  // File-only sessions own the whole pane as a file browser — the
-  // right-panel SFTP / Resource Monitor modes don't apply.
+  // File-only sessions own the whole pane as a file browser — the in-pane
+  // Files / Resource Monitor panels don't apply to them.
   const activeIsFileOnly = isFileOnly(activeSession?.type);
-  // The right-panel modes (Remote files + Resource monitor) only apply to
-  // SSH-backed sessions: hostKey is non-null exactly for ssh / ec2. Local
-  // shell and WSL are terminal panes with no remote to browse or poll, so
-  // both buttons are disabled (and the panel auto-closes) for them too.
-  const activeHasRemotePanel = !!activeHostKey;
-  useEffect(() => {
-    if (!activeHasRemotePanel && rightOpen) setRightOpen(false);
-  }, [activeHasRemotePanel, rightOpen]);
+  // The active pane's leaf + its current panel arrangement, used to drive the
+  // tab-row Files / Monitor toggle buttons (active state + add/remove).
+  const activePaneLeaf =
+    activeTab && activePaneId ? findLeaf(activeTab.layout, activePaneId) : null;
+  const activePanePanels: PanelNode | null = activePaneLeaf
+    ? activePaneLeaf.panels ?? defaultPanelLayout(activeSession?.type)
+    : null;
+  // The Files / Monitor toolbar toggles apply to the optional in-pane panels,
+  // which only SSH-backed sessions (ssh/ec2) can host. A file-only session's
+  // files view IS its whole pane (not a toggle), so its buttons stay disabled.
+  const activeSshBacked = isSshBacked(activeSession?.type);
+  const panelOpen = (kind: PanelKind) =>
+    !!activePanePanels && hasPanel(activePanePanels, kind);
+  // Toggle a panel kind in the active pane: add it (docked) if absent, remove
+  // it if present. Gated by what the session type can host.
+  const toggleActivePanePanel = (kind: PanelKind) => {
+    if (!activeTab || !activePaneId || !activePaneLeaf || !activePanePanels) return;
+    const type = activeSession?.type;
+    if (!availablePanels(type).includes(kind)) return;
+    const next = hasPanel(activePanePanels, kind)
+      ? removePanel(activePanePanels, kind)
+      : addPanel(activePanePanels, kind, type);
+    setPanePanels(activeTab.id, activePaneId, next);
+  };
 
   // Resource polling is scoped to open panes, not the focused tab: one
   // poller per server (user@host:port, or the EC2 key) runs while any tab
@@ -1973,7 +2003,7 @@ function App() {
   const activeTabPanes = activeTab ? paneCount(activeTab.layout) : 0;
   const syncInputOn = activeTabId ? syncInputTabs.has(activeTabId) : false;
 
-  // ─── Sidebar / right-panel resize drag ───────────────────────────────
+  // ─── Sidebar resize drag ─────────────────────────────────────────────
   const startSidebarDrag = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -2341,32 +2371,20 @@ function App() {
                 </svg>
               </ToolBtn>
               <ToolBtn
-                title="Remote files"
-                active={rightOpen && rightMode === 'sftp'}
-                disabled={!activeHasRemotePanel}
-                onClick={() => {
-                  if (rightOpen && rightMode === 'sftp') setRightOpen(false);
-                  else {
-                    setRightMode('sftp');
-                    setRightOpen(true);
-                  }
-                }}
+                title="Remote files panel"
+                active={panelOpen('files')}
+                disabled={!activeSshBacked}
+                onClick={() => toggleActivePanePanel('files')}
               >
                 <svg width={ICON.xl} height={ICON.xl} viewBox="0 0 14 14" fill="none">
                   <path d="M2 4 L2 11 L12 11 L12 5 L7 5 L6 4 Z" stroke="currentColor" strokeWidth="1.1" />
                 </svg>
               </ToolBtn>
               <ToolBtn
-                title="Resource monitor"
-                active={rightOpen && rightMode === 'resources'}
-                disabled={!activeHasRemotePanel}
-                onClick={() => {
-                  if (rightOpen && rightMode === 'resources') setRightOpen(false);
-                  else {
-                    setRightMode('resources');
-                    setRightOpen(true);
-                  }
-                }}
+                title="Resource monitor panel"
+                active={panelOpen('resources')}
+                disabled={!activeSshBacked}
+                onClick={() => toggleActivePanePanel('resources')}
               >
                 <svg width={ICON.xl} height={ICON.xl} viewBox="0 0 16 16" fill="none">
                   <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
@@ -2508,20 +2526,50 @@ function App() {
                               type: s?.type || 'shell',
                             };
                           }}
-                          renderPane={(cell) => {
+                          onPanelsChange={(paneId, panels) => setPanePanels(t.id, paneId, panels)}
+                          renderPanelBody={(cell, kind, opts) => {
                             const cellSession = sessionById(cell.sessionId) || null;
-                            const fileOnly = isFileOnly(cellSession?.type);
-                            if (fileOnly) {
+                            const activePane = t.id === activeTabId && opts.isActivePane;
+                            if (kind === 'resources') {
+                              // The monitor's stacked charts are taller than the
+                              // panel — wrap in a vertical scroller (the old
+                              // right-panel did the same) so nothing is clipped.
                               return (
-                                <SftpDualPanel
+                                <div
+                                  style={{
+                                    width: '100%',
+                                    height: '100%',
+                                    overflowY: 'auto',
+                                    overflowX: 'hidden',
+                                  }}
+                                >
+                                  <ResourcePanel
+                                    paneId={cell.id}
+                                    paneState={paneStates[cell.id] || null}
+                                    hostKey={hostKeyFor(cellSession)}
+                                  />
+                                </div>
+                              );
+                            }
+                            if (kind === 'files') {
+                              // A file-only session's pane IS a full dual browser;
+                              // an SSH session's "files" panel is the slim remote
+                              // browser (the terminal owns the pane).
+                              if (isFileOnly(cellSession?.type)) {
+                                return (
+                                  <SftpDualPanel
+                                    paneId={cell.id}
+                                    paneState={paneStates[cell.id] || null}
+                                    session={cellSession || null}
+                                    logs={logs[cell.id] || []}
+                                    isActive={activePane}
+                                  />
+                                );
+                              }
+                              return (
+                                <SftpPanel
                                   paneId={cell.id}
                                   paneState={paneStates[cell.id] || null}
-                                  session={cellSession || null}
-                                  logs={logs[cell.id] || []}
-                                  isActive={
-                                    t.id === activeTabId &&
-                                    cell.id === (activePaneByTab[t.id] || null)
-                                  }
                                 />
                               );
                             }
@@ -2531,10 +2579,7 @@ function App() {
                                 paneState={paneStates[cell.id]}
                                 sessionType={cellSession?.type}
                                 active={t.id === activeTabId}
-                                activePane={
-                                  t.id === activeTabId &&
-                                  cell.id === (activePaneByTab[t.id] || null)
-                                }
+                                activePane={activePane}
                                 onReconnect={() => void reloadPane(t.id, cell.id)}
                                 onReloadTab={() => void reloadTab(t.id)}
                                 onInputBeforeSend={
@@ -2554,19 +2599,6 @@ function App() {
                 )}
               </div>
 
-              {rightOpen && (
-                <RightPanel
-                  mode={rightMode}
-                  width={rightWidth}
-                  onResize={setRightWidth}
-                  onClose={() => setRightOpen(false)}
-                  sessionLabel={activeSession?.label || null}
-                  hostLabel={activeSession?.host || activeSession?.label || null}
-                  paneId={activePaneId}
-                  paneState={activePaneState}
-                  hostKey={activeHostKey}
-                />
-              )}
             </div>
 
             {/* Status bar lives inside the right column so the sidebar

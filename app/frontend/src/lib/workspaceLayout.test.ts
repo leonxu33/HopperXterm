@@ -64,3 +64,59 @@ describe('wsNodeToLayout / loadWsLayout — restore cwd', () => {
     expect(seen.get('fresh')).toBe('/home/u');
   });
 });
+
+describe('inner panel layout — serialize / restore', () => {
+  it('omits panels for an un-customized leaf', () => {
+    const live: PaneNode = { kind: 'leaf', id: 'p1', sessionId: 's1', weight: 1 };
+    expect('panels' in (toWsNode(live) as Record<string, unknown>)).toBe(false);
+  });
+
+  it('round-trips a customized panel arrangement (ids = kinds)', () => {
+    const live: PaneNode = {
+      kind: 'leaf',
+      id: 'p1',
+      sessionId: 's1',
+      weight: 1,
+      panels: {
+        kind: 'split',
+        dir: 'col',
+        weight: 1,
+        children: [
+          {
+            kind: 'split',
+            dir: 'row',
+            weight: 1,
+            children: [
+              { kind: 'leaf', id: 'terminal', weight: 1 },
+              { kind: 'leaf', id: 'files', weight: 0.7 },
+            ],
+          },
+          { kind: 'leaf', id: 'resources', weight: 0.5 },
+        ],
+      },
+    };
+    const ws = toWsNode(live) as Extract<WsNode, { kind: 'leaf' }>;
+    // Serialized form renames id → panel.
+    expect(ws.panels).toEqual({
+      kind: 'split',
+      dir: 'col',
+      weight: 1,
+      children: [
+        {
+          kind: 'split',
+          dir: 'row',
+          weight: 1,
+          children: [
+            { kind: 'leaf', panel: 'terminal', weight: 1 },
+            { kind: 'leaf', panel: 'files', weight: 0.7 },
+          ],
+        },
+        { kind: 'leaf', panel: 'resources', weight: 0.5 },
+      ],
+    });
+    // Restored live layout brings the panel ids back and keeps weights.
+    const restored = loadWsLayout(ws, () => 'fresh') as Extract<PaneNode, { kind: 'leaf' }>;
+    expect(JSON.stringify(restored.panels)).toContain('"id":"resources"');
+    expect(JSON.stringify(restored.panels)).toContain('"weight":0.7');
+  });
+});

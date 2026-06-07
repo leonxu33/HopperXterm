@@ -12,7 +12,18 @@
 
 export type MockPlatform = 'windows' | 'darwin' | 'linux';
 
-export function installWailsMock(platform: MockPlatform) {
+// Optional seed data so a test can boot with sessions/groups present (the
+// default is an empty workspace). Kept JSON-serializable — installWailsMock is
+// serialized into the page by addInitScript.
+export type MockSeed = {
+  platform: MockPlatform;
+  profiles?: { groups: unknown[]; sessions: unknown[] };
+};
+
+export function installWailsMock(seed: MockPlatform | MockSeed) {
+  const opts: MockSeed = typeof seed === 'string' ? { platform: seed } : seed;
+  const platform = opts.platform;
+  const profiles = opts.profiles ?? { groups: [], sessions: [] };
   const resolve =
     (v: unknown) =>
     () =>
@@ -21,7 +32,7 @@ export function installWailsMock(platform: MockPlatform) {
   // Bound App methods whose return shape the boot path actually reads; every
   // other method falls through to resolve(undefined), a harmless no-op.
   const appOverrides: Record<string, (...a: unknown[]) => unknown> = {
-    ListProfiles: resolve({ groups: [], sessions: [] }),
+    ListProfiles: resolve(profiles),
     ListWorkspaces: resolve([]),
     ListMacros: resolve([]),
     ListRecents: resolve([]),
