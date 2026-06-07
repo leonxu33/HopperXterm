@@ -42,6 +42,40 @@ html, body {
   background: transparent;
 }
 
+/* Linux opaque overlays. WebKitGTK (the Wails WebView on Linux) does not
+   composite CSS backdrop-filter, so a frosted overlay renders as its bare,
+   very-translucent fill over the sharp content underneath — unreadable. On
+   Linux only, the frosted *content* surfaces (modals, popovers, command
+   palette, context menus, toast — all tagged .hx-frost) drop the no-op blur
+   and use an opaque fill instead. Windows/macOS keep the frosted-glass look.
+   `!important` is required to beat the components' inline styles. The dim
+   modal scrims are intentionally NOT tagged .hx-frost — a translucent black
+   scrim reads fine without blur. */
+html[data-platform="linux"] .hx-frost {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.015) 100%),
+    #161b25 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Linux rounded window corners. Windows gets these from DWM and macOS from its
+   titled NSWindow, but a frameless GTK window has neither — so we round it
+   ourselves. main.go runs the Linux window translucent with a transparent base,
+   and here html/body are made transparent, so the area outside the app frame's
+   border-radius shows the desktop (needs a compositing WM — standard on modern
+   desktops; without one the cutouts fall back to black). The app frame and the
+   full-window modal scrims carry the radius (.hx-window-round) so corners stay
+   rounded even while a modal is open. Scoped to Linux, so Win/mac are
+   untouched. Keep this radius in sync with the value used by DWM (~10px). */
+html[data-platform="linux"],
+html[data-platform="linux"] body {
+  background: transparent;
+}
+html[data-platform="linux"] .hx-window-round {
+  border-radius: 10px;
+}
+
 /* Universal button press effect */
 button {
   transition: transform 0.08s ease, filter 0.12s ease;

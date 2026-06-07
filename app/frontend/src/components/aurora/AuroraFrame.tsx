@@ -9,6 +9,10 @@ import { FS, TOKENS } from '../../theme';
 export function AuroraFrame({ children }: { children: ReactNode }) {
   return (
     <div
+      // hx-window-round: on Linux we round the frameless window's corners in CSS
+      // (no DWM); this frame already clips its children via overflow:hidden, so
+      // the radius rounds the whole app. Win/mac ignore the class (see style.css).
+      className="hx-window-round"
       style={{
         position: 'fixed',
         inset: 0,

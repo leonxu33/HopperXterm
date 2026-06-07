@@ -10,6 +10,14 @@ let platform = '';
 try {
   void Environment().then((env) => {
     platform = env.platform;
+    // Stamp the host OS onto <html> so platform-conditional CSS can key off it
+    // (e.g. the Linux opaque-overlay rule in style.css — WebKitGTK can't blur,
+    // so frosted .hx-frost surfaces fall back to an opaque fill). The probe
+    // resolves within ms of startup, long before any transient overlay opens,
+    // so there's no flash.
+    if (typeof document !== 'undefined') {
+      document.documentElement.dataset.platform = platform;
+    }
   });
 } catch {
   // Non-Wails host (unit tests / plain browser): window.runtime is absent and

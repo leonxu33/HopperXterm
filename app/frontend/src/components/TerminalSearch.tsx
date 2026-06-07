@@ -80,7 +80,7 @@ export function TerminalSearch({ addon, onClose, focusTick, onFocusTerminal }: P
         : '';
 
   return (
-    <div style={bar} onMouseDown={(e) => e.stopPropagation()}>
+    <div className="hx-frost" style={bar} onMouseDown={(e) => e.stopPropagation()}>
       <input
         ref={inputRef}
         value={term}

@@ -83,8 +83,8 @@ export function Modal({
   }, [onClose, onSubmit]);
 
   return (
-    <div onClick={blockOutsideClose ? undefined : onClose} style={backdrop}>
-      <div onClick={(e) => e.stopPropagation()} style={{ ...panel, width }}>
+    <div onClick={blockOutsideClose ? undefined : onClose} className="hx-window-round" style={backdrop}>
+      <div onClick={(e) => e.stopPropagation()} className="hx-frost" style={{ ...panel, width }}>
         <div style={header}>
           {iconTile && (
             <div
@@ -460,6 +460,7 @@ function DropdownMenu({
     <div
       ref={popRef}
       data-dropdown="true"
+      className="hx-frost"
       style={{
         position: 'fixed',
         left: pos.left,

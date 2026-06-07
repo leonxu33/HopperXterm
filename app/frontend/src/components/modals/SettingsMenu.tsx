@@ -25,6 +25,7 @@ export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustom
   return (
     <div
       ref={ref}
+      className="hx-frost"
       onClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
       style={{

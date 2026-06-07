@@ -3159,6 +3159,7 @@ function Toast({ message, tone, onDone }: { message: string; tone: ToastTone; on
     <div
       role="status"
       aria-live="polite"
+      className="hx-frost"
       style={{
         ...toastSurface,
         animationDuration: `${ms}ms`,

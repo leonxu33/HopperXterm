@@ -44,6 +44,7 @@ export function WorkspacesPopover({
   return (
     <div
       ref={ref}
+      className="hx-frost"
       onClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
       style={{

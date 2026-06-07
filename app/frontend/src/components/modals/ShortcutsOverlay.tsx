@@ -10,6 +10,7 @@ import { KEYBOARD_ICON, SHORTCUT_SECTIONS, SectionBlock } from './shortcutsData'
 export function ShortcutsOverlay() {
   return createPortal(
     <div
+      className="hx-window-round"
       style={{
         position: 'fixed',
         inset: 0,
@@ -24,6 +25,7 @@ export function ShortcutsOverlay() {
       }}
     >
       <div
+        className="hx-frost"
         style={{
           display: 'flex',
           flexDirection: 'column',

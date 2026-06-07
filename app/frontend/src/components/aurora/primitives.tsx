@@ -315,7 +315,7 @@ export function ContextMenu({
   // the outside-click handler treats it as "inside" and keeps it open.
   return createPortal(
     <div ref={ref} data-context-menu="true">
-      <div style={{ ...menuSurface, left: px, top: py, zIndex: 80 }}>
+      <div className="hx-frost" style={{ ...menuSurface, left: px, top: py, zIndex: 80 }}>
         {items.map((it, i) => {
           if (it.kind === 'separator') {
             return (
@@ -341,6 +341,7 @@ export function ContextMenu({
 
       {openItem?.kind === 'submenu' && subPos && (
         <div
+          className="hx-frost"
           style={{ ...menuSurface, left: subPos.x, top: subPos.y, zIndex: 81, maxHeight: 360, overflowY: 'auto' }}
         >
           {openItem.items.length === 0 ? (

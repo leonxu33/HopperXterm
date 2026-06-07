@@ -206,8 +206,8 @@ export function CommandPalette({ sessions, groups, workspaces, recents, onClose,
   }, [filtered, cursor, onClose, onPick]);
 
   return (
-    <div onClick={onClose} style={backdrop}>
-      <div onClick={(e) => e.stopPropagation()} style={panel}>
+    <div onClick={onClose} className="hx-window-round" style={backdrop}>
+      <div onClick={(e) => e.stopPropagation()} className="hx-frost" style={panel}>
         <div style={inputRow}>
           <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none" style={{ color: TOKENS.fgDim, flex: '0 0 auto' }}>
             <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.3" />

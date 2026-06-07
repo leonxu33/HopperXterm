@@ -893,6 +893,7 @@ function ColorPickerPopover({
     >
       <div
         onClick={(e) => e.stopPropagation()}
+        className="hx-frost"
         style={{
           padding: '16px 18px',
           borderRadius: 14,
