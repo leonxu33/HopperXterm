@@ -26,22 +26,33 @@ const (
 	maxItems = 12
 )
 
-// Ref points at a recently opened target. Kind is "session" or
-// "workspace"; exactly one of ID / Name is set accordingly. Mirrors the
-// frontend RecentRef union.
+// Ref points at a recently opened target. Kind is "session", "workspace",
+// or "quick"; exactly one of ID / Name / Cmd is set accordingly. Mirrors
+// the frontend RecentRef union.
+//
+// A "quick" ref is a quick-connect command line (e.g. "!ssh u@host -p 2222")
+// for a temporary session. Unlike sessions/workspaces it stores the target
+// inline (the command itself) rather than referencing a persisted record,
+// because temporary sessions are never saved — re-running just re-parses the
+// command and opens a fresh temporary session.
 type Ref struct {
 	Kind string `json:"kind"`
 	ID   string `json:"id,omitempty"`
 	Name string `json:"name,omitempty"`
+	Cmd  string `json:"cmd,omitempty"`
 }
 
 // key uniquely identifies a ref for dedup, matching the frontend's
 // recentKey() so the two sides agree on identity.
 func (r Ref) key() string {
-	if r.Kind == "workspace" {
+	switch r.Kind {
+	case "workspace":
 		return "workspace:" + r.Name
+	case "quick":
+		return "quick:" + r.Cmd
+	default:
+		return "session:" + r.ID
 	}
-	return "session:" + r.ID
 }
 
 func (r Ref) valid() bool {
@@ -50,6 +61,8 @@ func (r Ref) valid() bool {
 		return r.ID != ""
 	case "workspace":
 		return r.Name != ""
+	case "quick":
+		return r.Cmd != ""
 	default:
 		return false
 	}

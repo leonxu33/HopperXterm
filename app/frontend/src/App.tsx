@@ -19,6 +19,8 @@ import {
   SaveGroup,
   DeleteGroup,
   SaveSession,
+  SaveTransientSession,
+  RemoveTransient,
   DeleteSession,
   MoveSession,
   ReorderGroup,
@@ -96,6 +98,7 @@ import {
   type LegacyColumn,
 } from './lib/workspaceLayout';
 import { NewSessionModal, type NewSessionDraft } from './components/modals/NewSessionModal';
+import { parseQuickConnect, type QuickConnectDraft } from './lib/parseQuickConnect';
 import { CommandPalette, type PaletteAction } from './components/modals/CommandPalette';
 import { SaveWorkspaceModal } from './components/modals/WorkspaceModals';
 import { WorkspacesPopover } from './components/modals/WorkspacesPopover';
@@ -117,19 +120,25 @@ type WorkspaceSnapshot = { name: string; tabs: WorkspaceTab[]; updatedAt: number
 // reloads and matches the rest of the app's CRUD-on-JSON persistence.
 // Capped well above the 4 shown so deletions/renames can fall through to
 // still-valid older entries; the backend enforces the same cap.
-type RecentRef = { kind: 'session'; id: string } | { kind: 'workspace'; name: string };
+type RecentRef =
+  | { kind: 'session'; id: string }
+  | { kind: 'workspace'; name: string }
+  | { kind: 'quick'; cmd: string }; // quick-connect command for a temporary session
 const RECENTS_CAP = 12;
 function recentKey(r: RecentRef): string {
-  return r.kind === 'session' ? `session:${r.id}` : `workspace:${r.name}`;
+  if (r.kind === 'session') return `session:${r.id}`;
+  if (r.kind === 'workspace') return `workspace:${r.name}`;
+  return `quick:${r.cmd}`;
 }
 
 // A resolved recent entry shown in the empty-tab / no-tab quick-launch list.
 type RecentItem = {
-  key: string; // `session:<id>` or `workspace:<name>`
-  kind: 'session' | 'workspace';
+  key: string; // `session:<id>`, `workspace:<name>`, or `quick:<cmd>`
+  kind: 'session' | 'workspace' | 'quick';
   label: string;
   iconKind?: string; // session protocol → ProtoIcon glyph
-  sub?: string; // host/user for sessions, tab count for workspaces
+  sub?: string; // host/user for sessions, tab count for workspaces, command for quick
+  cmd?: string; // quick-connect command line (kind === 'quick')
 };
 
 type Snapshot = { groups: Group[]; sessions: Session[] };
@@ -255,12 +264,37 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newSessionModal, setNewSessionModal] = useState<{ groupId: string } | null>(null);
   const [editSessionModal, setEditSessionModal] = useState<Session | null>(null);
+  // "Save session…" opens the session editor pre-filled with the transient
+  // draft so the user can review/edit before persisting.
+  const [promoteTab, setPromoteTab] = useState<{ draft: NewSessionDraft } | null>(null);
+  // Drafts for live temporary (quick-connect) sessions, keyed by their
+  // transient session id. Kept frontend-side so "Save session…" can repopulate
+  // the editor, sessionById can label/type a transient pane, and the
+  // password-save prompts can be suppressed for them. (Non-reactive — also
+  // read inside Wails event-handler closures.)
+  const transientDraftsRef = useRef<Map<string, NewSessionDraft>>(new Map());
+  // Reactive mirror of the transient ids, used to DERIVE a tab's "temporary"
+  // status from its panes (badge, merge-block, cleanup) rather than a static
+  // per-tab flag — so it stays correct across split / drop-replace / promote.
+  const [transientIds, setTransientIds] = useState<ReadonlySet<string>>(() => new Set());
+  // Ids of tabs that contain a temporary (quick-connect) pane — derived once
+  // per tabs/transientIds change. Single source for the ⚡ badge, merge-block,
+  // single-pane lock, and the split/drop/open guards (O(1) membership instead
+  // of re-walking each tab's layout at every call site).
+  const tempTabIds = useMemo(() => {
+    const out = new Set<string>();
+    for (const t of tabs) {
+      if (paneLeaves(t.layout).some((l) => transientIds.has(l.sessionId))) out.add(t.id);
+    }
+    return out;
+  }, [tabs, transientIds]);
   const [askSavePwd, setAskSavePwd] = useState<{ paneId: string; host: string; user: string } | null>(null);
   const [askPwd, setAskPwd] = useState<{
     paneId: string;
     host: string;
     user: string;
     question: string;
+    transient?: boolean; // temporary (quick-connect) pane — never offer to save
   } | null>(null);
   const [pwdInput, setPwdInput] = useState('');
   const [pwdSave, setPwdSave] = useState(false);
@@ -437,6 +471,12 @@ function App() {
       const offAskSave = EventsOn(
         `pane:asksavepassword:${paneId}`,
         (p: { sessionId: string; host?: string; user?: string }) => {
+          // A temporary (quick-connect) session is explicitly throwaway, so
+          // don't offer to persist its password — just drop the in-memory copy.
+          if (transientDraftsRef.current.has(p.sessionId)) {
+            void DiscardCurrentPassword(paneId).catch(() => {});
+            return;
+          }
           setAskSavePwd({ paneId, host: p.host || '', user: p.user || '' });
         },
       );
@@ -450,6 +490,7 @@ function App() {
             host: p.host || '',
             user: p.user || '',
             question: p.question || 'Password',
+            transient: transientDraftsRef.current.has(p.sessionId),
           });
         },
       );
@@ -674,6 +715,10 @@ function App() {
     if (!activeTabId) return openSession(s);
     const tab = tabs.find((t) => t.id === activeTabId);
     if (!tab) return openSession(s);
+    // Don't add a pane into a temporary tab — open the session in its own tab.
+    if (tempTabIds.has(tab.id)) {
+      return openSession(s);
+    }
     if (paneCount(tab.layout) >= PANE_LIMIT) {
       setErr(`Max ${PANE_LIMIT} panes per tab.`);
       return;
@@ -695,6 +740,117 @@ function App() {
     const s = snap.sessions.find((x) => x.id === sessionId);
     if (s) await openSession(s);
   };
+
+  // Open a temporary (quick-connect) session: register it in the backend's
+  // in-memory transient registry (never persisted, never in the sidebar),
+  // then open a tab against it exactly like a saved session. The tab's
+  // "temporary" status is DERIVED from transientIds (so it survives
+  // split/merge/promote); the draft is stashed in transientDraftsRef for
+  // promotion + rendering.
+  const openTransientSession = async (d: QuickConnectDraft) => {
+    const sessionId = newId('tmp');
+    const draft: NewSessionDraft = {
+      id: sessionId,
+      type: d.type,
+      label: d.label,
+      groupId: '',
+      host: d.host,
+      user: d.user,
+      port: d.port,
+      pemFile: d.pemFile,
+    };
+    const paneId = newId('pane');
+    const tab: Tab = {
+      id: newId('tab'),
+      sessionId,
+      type: d.type,
+      label: d.label,
+      state: 'Connecting',
+      layout: singleLeafLayout(paneId, sessionId),
+      isFileTab: isFileOnly(d.type),
+    };
+    // Add the id to the reactive set and the tab in the same batch (before any
+    // await) so the orphan-GC effect never sees the id without its tab.
+    transientDraftsRef.current.set(sessionId, draft);
+    setTransientIds((cur) => new Set(cur).add(sessionId));
+    setTabs((cur) => [...cur, tab]);
+    setActiveTabId(tab.id);
+    setActivePaneByTab((cur) => ({ ...cur, [tab.id]: paneId }));
+    setSelectedSessionId(null);
+    // Remember the command (not the ephemeral session id) so the quick connect
+    // can be re-fired from the new-tab recents, even across restarts.
+    pushRecent({ kind: 'quick', cmd: d.cmd });
+    try {
+      // Must register before OpenPane — the backend resolves the session by id.
+      await SaveTransientSession(draft as any);
+    } catch (e) {
+      // Roll back the optimistic tab + registry entry.
+      transientDraftsRef.current.delete(sessionId);
+      setTransientIds((cur) => {
+        const n = new Set(cur);
+        n.delete(sessionId);
+        return n;
+      });
+      setTabs((cur) => cur.filter((t) => t.id !== tab.id));
+      setErr(`Quick connect failed: ${String(e)}`);
+      return;
+    }
+    try {
+      await OpenPane(paneId, sessionId);
+    } catch (e) {
+      setErr(`OpenPane failed: ${String(e)}`);
+      setPaneStates((cur) => ({ ...cur, [paneId]: 'Disconnected' }));
+    }
+  };
+
+  // Persist a temporary session. Called from the "Save session…" editor; keeps
+  // the same session id so the open pane(s) / reconnect keep working, then
+  // drops the transient registry entry. The ⚡ badge clears automatically once
+  // the id leaves transientIds.
+  const submitPromoteSession = async (draft: NewSessionDraft) => {
+    const pt = promoteTab;
+    setPromoteTab(null);
+    if (!pt) return;
+    try {
+      await SaveSession(draft as any);
+      await RemoveTransient(draft.id);
+      transientDraftsRef.current.delete(draft.id);
+      setTransientIds((cur) => {
+        const n = new Set(cur);
+        n.delete(draft.id);
+        return n;
+      });
+      await refresh();
+      setNotice('Session saved.');
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  // Drop transient ids that no longer appear in any open tab — covers tab
+  // close, pane close, close-all, and drop-replace uniformly, so the in-memory
+  // registry never leaks. (Promotion removes its id explicitly above, so a
+  // promoted-but-still-open session is simply absent here.)
+  useEffect(() => {
+    if (transientIds.size === 0) return;
+    const referenced = new Set<string>();
+    for (const t of tabs) {
+      for (const l of paneLeaves(t.layout)) {
+        if (transientIds.has(l.sessionId)) referenced.add(l.sessionId);
+      }
+    }
+    const orphans = [...transientIds].filter((id) => !referenced.has(id));
+    if (orphans.length === 0) return;
+    setTransientIds((cur) => {
+      const n = new Set(cur);
+      orphans.forEach((id) => n.delete(id));
+      return n;
+    });
+    orphans.forEach((id) => {
+      transientDraftsRef.current.delete(id);
+      void RemoveTransient(id).catch(() => {});
+    });
+  }, [tabs, transientIds]);
 
   // Reload a tab: close every current pane in the tab and re-open
   // fresh ones against the same session IDs. Keeps the tab's layout,
@@ -736,7 +892,40 @@ function App() {
     const src = tabs.find((t) => t.id === tabId);
     if (!src) return;
     const newTabId = newId('tab');
-    const newLayout = cloneWithNewIds(src.layout, () => newId('pane'));
+    let newLayout = cloneWithNewIds(src.layout, () => newId('pane'));
+
+    // A temporary tab's copy is its OWN temporary session: mint a fresh
+    // transient id for each distinct transient session it references (cloned
+    // from the same connection details), so the two are independent —
+    // promoting or closing one never touches the other. The new ids are
+    // registered (awaited) here but only added to transientIds together with
+    // the tab below, so the orphan-GC effect never races them.
+    const newTransientIds: string[] = [];
+    if (newLayout) {
+      const remap = new Map<string, string>();
+      for (const leaf of paneLeaves(newLayout)) {
+        const oldDraft = transientDraftsRef.current.get(leaf.sessionId);
+        if (!oldDraft || !transientIds.has(leaf.sessionId)) continue; // not a transient leaf
+        let newSid = remap.get(leaf.sessionId);
+        if (!newSid) {
+          newSid = newId('tmp');
+          remap.set(leaf.sessionId, newSid);
+          const newDraft: NewSessionDraft = { ...oldDraft, id: newSid };
+          transientDraftsRef.current.set(newSid, newDraft);
+          newTransientIds.push(newSid);
+          try {
+            // Register before OpenPane — the backend resolves the id on open.
+            await SaveTransientSession(newDraft as any);
+          } catch (e) {
+            transientDraftsRef.current.delete(newSid);
+            setErr(`Duplicate failed: ${String(e)}`);
+            return;
+          }
+        }
+        newLayout = replaceLeaf(newLayout, leaf.id, { ...leaf, sessionId: newSid });
+      }
+    }
+
     const firstCell = paneLeaves(newLayout)[0] ?? null;
     const newTab: Tab = {
       id: newTabId,
@@ -747,6 +936,13 @@ function App() {
       layout: newLayout,
       isFileTab: src.isFileTab,
     };
+    if (newTransientIds.length) {
+      setTransientIds((cur) => {
+        const n = new Set(cur);
+        newTransientIds.forEach((id) => n.add(id));
+        return n;
+      });
+    }
     setTabs((cur) => {
       const idx = cur.findIndex((t) => t.id === tabId);
       if (idx < 0) return [...cur, newTab];
@@ -797,6 +993,9 @@ function App() {
     const tab = tabs.find((t) => t.id === tabId);
     if (!tab) return;
     if (!findLeaf(tab.layout, targetPaneId)) return;
+    // A temporary tab stays single-pane and never absorbs a saved session
+    // (the PaneGrid drop UI already blocks this; this is a backstop).
+    if (tempTabIds.has(tab.id)) return;
 
     if (payload.kind === 'session') {
       const sid = payload.sessionId;
@@ -875,6 +1074,11 @@ function App() {
     if (!activeTabId) return;
     const tab = tabs.find((t) => t.id === activeTabId);
     if (!tab) return;
+    // Temporary (quick-connect) tabs stay a single throwaway pane.
+    if (tempTabIds.has(tab.id)) {
+      setErr('Save the session first to split it into more panes.');
+      return;
+    }
     if (paneCount(tab.layout) >= PANE_LIMIT) return;
     const activePaneId = activePaneByTab[tab.id];
     const sourceCell =
@@ -961,6 +1165,10 @@ function App() {
       const source = cur.find((t) => t.id === sourceTabId);
       const target = cur.find((t) => t.id === targetTabId);
       if (!source || !target) return cur;
+      // Temporary (quick-connect) tabs are kept standalone — never merge one
+      // into (or absorb one onto) a saved tab. The TabBar already blocks the
+      // drop UI; this is a defensive backstop.
+      if (tempTabIds.has(source.id) || tempTabIds.has(target.id)) return cur;
       const targetCount = paneCount(target.layout);
       const room = PANE_LIMIT - targetCount;
       if (room <= 0) return cur;
@@ -991,6 +1199,8 @@ function App() {
     const paneN = paneCount(tab.layout);
     const reallyClose = async () => {
       for (const leaf of paneLeaves(tab.layout)) await ClosePane(leaf.id);
+      // Any transient sessions this tab held are dropped by the orphan-GC
+      // effect once the tab leaves `tabs` — no per-tab cleanup needed here.
       setTabs((cur) => {
         const next = cur.filter((t) => t.id !== tabId);
         if (tabId === activeTabId) {
@@ -1271,6 +1481,9 @@ function App() {
     switch (action.kind) {
       case 'open-session':
         void openSession(action.session);
+        break;
+      case 'quick-connect':
+        void openTransientSession(action.draft);
         break;
       case 'load-workspace':
         void onLoadWorkspace(action.name);
@@ -1577,6 +1790,17 @@ function App() {
           iconKind: s.type,
           sub: host,
         });
+      } else if (r.kind === 'quick') {
+        const parsed = parseQuickConnect(r.cmd);
+        if (!parsed.ok) continue; // drop a command we can no longer parse
+        out.push({
+          key: recentKey(r),
+          kind: 'quick',
+          label: parsed.draft.label,
+          iconKind: parsed.draft.type,
+          sub: 'Quick connect',
+          cmd: r.cmd,
+        });
       } else {
         const ws = workspaces.find((w) => w.name === r.name);
         if (!ws) continue;
@@ -1596,6 +1820,10 @@ function App() {
     if (item.kind === 'session') {
       const id = item.key.slice('session:'.length);
       void openSessionById(id);
+    } else if (item.kind === 'quick') {
+      const parsed = parseQuickConnect(item.cmd ?? '');
+      if (parsed.ok) void openTransientSession(parsed.draft);
+      else setErr('Could not parse quick-connect command.');
     } else {
       const name = item.key.slice('workspace:'.length);
       void onLoadWorkspace(name);
@@ -1621,13 +1849,26 @@ function App() {
     );
   }, [paneStates]);
 
+  // Resolve a pane's session by id, including in-memory temporary
+  // (quick-connect) sessions that aren't in the saved list. Without this a
+  // transient pane falls back to a default shell terminal + "(unnamed)"
+  // instead of rendering as its real protocol (e.g. an SFTP browser).
+  const sessionById = useCallback(
+    (id: string | null | undefined): Session | undefined => {
+      if (!id) return undefined;
+      const saved = snap.sessions.find((x) => x.id === id);
+      if (saved) return saved;
+      const d = transientDraftsRef.current.get(id);
+      return d ? (d as unknown as Session) : undefined;
+    },
+    [snap.sessions],
+  );
+
   const activeTab = tabs.find((t) => t.id === activeTabId) || null;
   const activePaneId = activeTab ? activePaneByTab[activeTab.id] || null : null;
   const activePaneSessionId =
     activeTab && activePaneId ? findLeaf(activeTab.layout, activePaneId)?.sessionId || null : null;
-  const activeSession = activePaneSessionId
-    ? snap.sessions.find((s) => s.id === activePaneSessionId) || null
-    : null;
+  const activeSession = activePaneSessionId ? sessionById(activePaneSessionId) || null : null;
   const activePaneState = activePaneId ? paneStates[activePaneId] || null : null;
   const activeHostKey = hostKeyFor(activeSession);
   // File-only sessions own the whole pane as a file browser — the
@@ -1693,12 +1934,12 @@ function App() {
       if (!tab) return;
       for (const cell of paneLeaves(tab.layout)) {
         if (cell.id === sourcePaneId) continue;
-        const s = snap.sessions.find((x) => x.id === cell.sessionId);
+        const s = sessionById(cell.sessionId);
         if (s && isFileOnly(s.type)) continue;
         SendInput(cell.id, data).catch(() => {});
       }
     },
-    [activeTabId, syncInputTabs, tabs, snap.sessions],
+    [activeTabId, syncInputTabs, tabs, sessionById],
   );
 
   // ─── Macros (record / replay) ────────────────────────────────────────
@@ -1760,7 +2001,26 @@ function App() {
   const tabContextItems = (tabId: string): ContextMenuItem[] => {
     const t = tabs.find((x) => x.id === tabId);
     if (!t) return [];
+    // "Save session…" promotes the tab's transient pane (the first one, for a
+    // split temp tab). Derived from transientIds so it appears exactly while a
+    // transient pane is present.
+    const tempLeaf = t.layout
+      ? paneLeaves(t.layout).find((l) => transientIds.has(l.sessionId))
+      : undefined;
     return [
+      ...(tempLeaf
+        ? [
+            {
+              kind: 'item' as const,
+              label: 'Save session…',
+              onClick: () => {
+                const draft = transientDraftsRef.current.get(tempLeaf.sessionId);
+                if (draft) setPromoteTab({ draft });
+              },
+            },
+            { kind: 'separator' as const },
+          ]
+        : []),
       {
         kind: 'item',
         label: 'Rename tab',
@@ -1971,6 +2231,7 @@ function App() {
                 renameTick={tabRenameTick}
                 onContextMenu={(tabId, x, y) => setTabCtxMenu({ tabId, x, y })}
                 onDropSession={openSessionById}
+                tempTabIds={tempTabIds}
               />
               <ToolBtn
                 ref={macrosBtnRef}
@@ -2139,6 +2400,12 @@ function App() {
                               const id = item.key.slice('session:'.length);
                               pushRecent({ kind: 'session', id });
                               void splitIntoTabBySession(t.id, id);
+                            } else if (item.kind === 'quick') {
+                              // Temporary sessions stay standalone — open a fresh
+                              // quick-connect tab rather than filling this one.
+                              const parsed = parseQuickConnect(item.cmd ?? '');
+                              if (parsed.ok) void openTransientSession(parsed.draft);
+                              else setErr('Could not parse quick-connect command.');
                             } else {
                               const name = item.key.slice('workspace:'.length);
                               void onLoadWorkspace(name);
@@ -2159,6 +2426,7 @@ function App() {
                             )
                           }
                           onClose={(paneId) => void closePane(t.id, paneId)}
+                          lockSinglePane={tempTabIds.has(t.id)}
                           onDropOnPane={(targetPaneId, zone, payload) =>
                             void onDropOnPane(t.id, targetPaneId, zone, payload)
                           }
@@ -2167,14 +2435,14 @@ function App() {
                           onReloadPane={(paneId) => void reloadPane(t.id, paneId)}
                           onReloadTab={() => void reloadTab(t.id)}
                           getPaneInfo={(cell) => {
-                            const s = snap.sessions.find((x) => x.id === cell.sessionId);
+                            const s = sessionById(cell.sessionId);
                             return {
                               label: s?.label || s?.host || '(unnamed)',
                               type: s?.type || 'shell',
                             };
                           }}
                           renderPane={(cell) => {
-                            const cellSession = snap.sessions.find((s) => s.id === cell.sessionId);
+                            const cellSession = sessionById(cell.sessionId) || null;
                             const fileOnly = isFileOnly(cellSession?.type);
                             if (fileOnly) {
                               return (
@@ -2347,6 +2615,7 @@ function App() {
           sessions={snap.sessions}
           groups={snap.groups}
           workspaces={workspaceEntries}
+          recents={recents}
           onClose={() => setPaletteOpen(false)}
           onPick={onPaletteAction}
         />
@@ -2365,6 +2634,14 @@ function App() {
           existing={editSessionModal as unknown as NewSessionDraft}
           onCancel={() => setEditSessionModal(null)}
           onSubmit={submitEditSession}
+        />
+      )}
+      {promoteTab && (
+        <NewSessionModal
+          groups={snap.groups}
+          existing={promoteTab.draft}
+          onCancel={() => setPromoteTab(null)}
+          onSubmit={submitPromoteSession}
         />
       )}
       {toast && <Toast key={toast.id} message={toast.message} tone={toast.tone} onDone={() => setToast(null)} />}
@@ -2430,31 +2707,34 @@ function App() {
           }
         >
           <Field label={askPwd.question}>
-            <SecretInput value={pwdInput} onChange={setPwdInput} placeholder="••••••••" />
+            <SecretInput value={pwdInput} onChange={setPwdInput} placeholder="••••••••" autoFocus />
           </Field>
-          <label
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              cursor: 'pointer',
-              font: `${FS.lg}px/1.4 ${TOKENS.font}`,
-              color: TOKENS.fgDim,
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={pwdSave}
-              onChange={(e) => setPwdSave(e.target.checked)}
+          {/* Temporary (quick-connect) sessions never persist a password. */}
+          {!askPwd.transient && (
+            <label
               style={{
-                width: 14,
-                height: 14,
-                accentColor: 'rgb(125,240,196)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
                 cursor: 'pointer',
+                font: `${FS.lg}px/1.4 ${TOKENS.font}`,
+                color: TOKENS.fgDim,
               }}
-            />
-            Save password for future connections
-          </label>
+            >
+              <input
+                type="checkbox"
+                checked={pwdSave}
+                onChange={(e) => setPwdSave(e.target.checked)}
+                style={{
+                  width: 14,
+                  height: 14,
+                  accentColor: 'rgb(125,240,196)',
+                  cursor: 'pointer',
+                }}
+              />
+              Save password for future connections
+            </label>
+          )}
         </Modal>
       )}
       {askSavePwd && (
@@ -2632,8 +2912,8 @@ function RecentList({
           onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
           onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
         >
-          {it.kind === 'session' ? (
-            <ProtoIcon kind={it.iconKind || 'ssh'} size={ICON.md} />
+          {it.iconKind ? (
+            <ProtoIcon kind={it.iconKind} size={ICON.md} flash={it.kind === 'quick'} />
           ) : (
             <svg
               width={ICON.md}

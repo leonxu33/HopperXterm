@@ -6,11 +6,14 @@ type Props = {
   kind: string;
   size?: number;
   ringed?: boolean;
+  // Overlay a small ⚡ badge marking a temporary (quick-connect) session —
+  // same proto tile, flagged as ephemeral. See FlashBadge.
+  flash?: boolean;
 };
 
-export function ProtoIcon({ kind, size = ICON.lg, ringed = true }: Props) {
+export function ProtoIcon({ kind, size = ICON.lg, ringed = true, flash = false }: Props) {
   const c = PROTOCOL_COLORS[kind] || PROTOCOL_COLORS.ssh;
-  return (
+  const tile = (
     <div
       style={{
         width: size,
@@ -29,6 +32,38 @@ export function ProtoIcon({ kind, size = ICON.lg, ringed = true }: Props) {
     >
       <Glyph kind={kind} size={Math.round(size * 0.62)} />
     </div>
+  );
+  if (!flash) return tile;
+  return (
+    <div style={{ position: 'relative', width: size, height: size, flex: '0 0 auto' }}>
+      {tile}
+      <FlashBadge size={size} />
+    </div>
+  );
+}
+
+// A bare lightning bolt pinned to the tile's bottom-right corner — warm amber
+// so it reads as "temporary / quick", with a thin dark outline so it stays
+// legible against any protocol tile colour. No chip/circle behind it.
+function FlashBadge({ size }: { size: number }) {
+  const b = Math.max(8, Math.round(size * 0.7));
+  return (
+    <svg
+      aria-hidden
+      width={b}
+      height={b}
+      viewBox="0 0 16 16"
+      style={{ position: 'absolute', right: -3, bottom: -2 }}
+    >
+      <path
+        d="M9 1 L3 9 H7 L6.5 15 L13 6 H8.5 Z"
+        fill="#ffcf45"
+        stroke="rgba(8,12,18,0.9)"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+        paintOrder="stroke"
+      />
+    </svg>
   );
 }
 

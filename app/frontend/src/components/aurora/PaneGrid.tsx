@@ -56,6 +56,10 @@ type Props = {
    *  session (from sidebar) or another pane (drag-moved within the same
    *  tab). Caller resolves the new layout. */
   onDropOnPane?: (targetPaneId: string, zone: DropZone, payload: DropPayload) => void;
+  /** Lock the tab to its single pane — forbids session/pane drops and split.
+   *  Used for temporary (quick-connect) tabs, which must stay one throwaway
+   *  pane and never absorb a saved session. */
+  lockSinglePane?: boolean;
 };
 
 // ─── Tree algebra (pure, unit-tested) ──────────────────────────────────────
@@ -322,6 +326,7 @@ type RenderCtx = {
   activePaneId: string | null;
   multiPane: boolean;
   atMax: boolean;
+  locked: boolean;
   renderPane: (leaf: PaneLeaf) => ReactNode;
   getPaneInfo?: (leaf: PaneLeaf) => PaneInfo;
   onActivate: (paneId: string) => void;
@@ -413,6 +418,7 @@ export function PaneGrid({
   onReloadTab,
   onResize,
   onDropOnPane,
+  lockSinglePane,
 }: Props) {
   const gridRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{
@@ -495,6 +501,7 @@ export function PaneGrid({
     activePaneId,
     multiPane: total > 1,
     atMax: total >= PANE_LIMIT,
+    locked: !!lockSinglePane,
     renderPane,
     getPaneInfo,
     onActivate,
@@ -620,6 +627,11 @@ function PaneCellView({ leaf, ctx }: { leaf: PaneLeaf; ctx: RenderCtx }) {
   // Pane drags never grow the count, so they're always allowed.
   const isForbiddenForZone = (e: React.DragEvent, zone: DropZone) => {
     if (isForbidden(e)) return true;
+    // A locked (temporary) tab accepts no session/pane drops — it stays a
+    // single throwaway pane and never absorbs a saved session.
+    if (ctx.locked && (hasType(e, 'application/x-hopper-session') || hasType(e, 'application/x-hopper-pane'))) {
+      return true;
+    }
     if (
       atMax &&
       zone !== 'center' &&
@@ -699,7 +711,7 @@ function PaneCellView({ leaf, ctx }: { leaf: PaneLeaf; ctx: RenderCtx }) {
           label={info.label}
           type={info.type}
           active={active}
-          canSplit={!atMax}
+          canSplit={!atMax && !ctx.locked}
           canDrag={ctx.multiPane}
           onSplitRight={ctx.onSplitRight ? () => ctx.onSplitRight!(leaf.id) : undefined}
           onSplitDown={ctx.onSplitDown ? () => ctx.onSplitDown!(leaf.id) : undefined}

@@ -124,6 +124,19 @@ func (a *App) SaveSession(s profile.Session) error {
 	return a.profile.SaveSession(s)
 }
 
+// SaveTransientSession registers an in-memory-only session (quick-connect /
+// temporary). It can be opened like any session but never persists to disk
+// and never shows in the sidebar; it's discarded when the app closes.
+func (a *App) SaveTransientSession(s profile.Session) error {
+	return a.profile.SaveTransientSession(s)
+}
+
+// RemoveTransient drops a transient session from the registry. Called when a
+// temporary tab closes so the in-memory map doesn't grow unbounded.
+func (a *App) RemoveTransient(id string) {
+	a.profile.RemoveTransient(id)
+}
+
 // DeleteSession removes a session by ID. Best-effort cleans up the
 // associated keychain entry so a future session with a recycled ID
 // (rare but possible) doesn't inherit stale credentials.
@@ -182,18 +195,11 @@ func (a *App) openPaneIn(paneID, sessionID, dir string) error {
 	if paneID == "" || sessionID == "" {
 		return fmt.Errorf("OpenPane: paneId and sessionId required")
 	}
-	snap := a.profile.Snapshot()
-	var sess *profile.Session
-	for i := range snap.Sessions {
-		if snap.Sessions[i].ID == sessionID {
-			sess = &snap.Sessions[i]
-			break
-		}
-	}
-	if sess == nil {
+	sess, ok := a.profile.Lookup(sessionID)
+	if !ok {
 		return fmt.Errorf("OpenPane: session %s not found", sessionID)
 	}
-	return a.panes.OpenInDir(paneID, *sess, dir)
+	return a.panes.OpenInDir(paneID, sess, dir)
 }
 
 // ClosePane terminates the pane's SSH session and cleans up its goroutines.

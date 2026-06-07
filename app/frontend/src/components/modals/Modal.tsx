@@ -201,16 +201,27 @@ export function SecretInput({
   onChange,
   placeholder,
   onKeyDown,
+  autoFocus,
 }: {
   value: string;
   onChange: (next: string) => void;
   placeholder?: string;
   onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
+  autoFocus?: boolean;
 }) {
   const [reveal, setReveal] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  // Focus on mount when requested (a small delay lets the modal finish
+  // mounting/portalling before we grab focus). Mirrors TabRenameInput.
+  useEffect(() => {
+    if (!autoFocus) return;
+    const t = setTimeout(() => inputRef.current?.focus(), 10);
+    return () => clearTimeout(t);
+  }, [autoFocus]);
   return (
     <div style={secretWrap}>
       <input
+        ref={inputRef}
         type={reveal ? 'text' : 'password'}
         value={value}
         onChange={(e) => onChange(e.target.value)}

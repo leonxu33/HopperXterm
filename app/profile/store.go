@@ -27,6 +27,14 @@ type Store struct {
 	dir      string
 	groups   []Group
 	sessions []Session
+
+	// transient holds in-memory-only sessions (quick-connect / temporary
+	// sessions). They are never written to disk and never appear in
+	// Snapshot (so they stay out of the sidebar), but Lookup resolves them
+	// so OpenPane / ReconnectPane can dial them like any saved session.
+	// Discarded on process exit, which is exactly the "gone when the app
+	// closes" contract.
+	transient map[string]Session
 }
 
 // OpenDefault opens the store under the shared app config dir (see
@@ -121,6 +129,47 @@ func (s *Store) SaveSession(sess Session) error {
 	copy(s.sessions[insertAt+1:], s.sessions[insertAt:])
 	s.sessions[insertAt] = sess
 	return s.persistSessions()
+}
+
+// Lookup resolves a session by ID, checking persisted sessions first and
+// then the in-memory transient registry. OpenPane / ReconnectPane use this
+// so a transient (quick-connect) session dials exactly like a saved one.
+func (s *Store) Lookup(id string) (Session, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i := range s.sessions {
+		if s.sessions[i].ID == id {
+			return s.sessions[i], true
+		}
+	}
+	if sess, ok := s.transient[id]; ok {
+		return sess, true
+	}
+	return Session{}, false
+}
+
+// SaveTransientSession upserts a session into the in-memory transient
+// registry. Never touches disk and never enters Snapshot, so the session
+// stays out of the sidebar and vanishes on app exit.
+func (s *Store) SaveTransientSession(sess Session) error {
+	if sess.ID == "" {
+		return errors.New("profile: session id required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.transient == nil {
+		s.transient = make(map[string]Session)
+	}
+	s.transient[sess.ID] = sess
+	return nil
+}
+
+// RemoveTransient drops a transient session from the registry. Called when a
+// temporary tab closes. No-op if the id isn't transient.
+func (s *Store) RemoveTransient(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.transient, id)
 }
 
 // DeleteSession removes a session by ID. Returns ErrNotFound if no match.

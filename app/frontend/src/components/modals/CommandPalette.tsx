@@ -10,21 +10,33 @@ import type { CSSProperties } from 'react';
 import { ICON, FS, TOKENS } from '../../theme';
 import type { Session, Group } from '../aurora/Sidebar';
 import { ProtoIcon, PROTO_LABELS } from '../aurora/ProtoIcon';
+import { parseQuickConnect, type QuickConnectDraft } from '../../lib/parseQuickConnect';
 
 export type PaletteAction =
   | { kind: 'open-session'; session: Session }
   | { kind: 'load-workspace'; name: string }
   | { kind: 'new-session' }
   | { kind: 'save-workspace' }
-  | { kind: 'manage-workspaces' };
+  | { kind: 'manage-workspaces' }
+  | { kind: 'quick-connect'; draft: QuickConnectDraft };
+
+// Mirrors App's RecentRef union (structurally compatible — passed in as-is).
+type RecentRef =
+  | { kind: 'session'; id: string }
+  | { kind: 'workspace'; name: string }
+  | { kind: 'quick'; cmd: string };
 
 type Props = {
   sessions: Session[];
   groups: Group[];
   workspaces: { name: string }[];
+  // MRU, newest-first. Shown as the default list when the query is empty.
+  recents: RecentRef[];
   onClose: () => void;
   onPick: (action: PaletteAction) => void;
 };
+
+const RECENTS_SHOWN = 8;
 
 type Item = {
   id: string;
@@ -34,63 +46,121 @@ type Item = {
   action: PaletteAction;
 };
 
-export function CommandPalette({ sessions, groups, workspaces, onClose, onPick }: Props) {
+export function CommandPalette({ sessions, groups, workspaces, recents, onClose, onPick }: Props) {
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const items: Item[] = useMemo(() => {
+  // ── Item builders (shared by the full search corpus and the recents view) ──
+  const sessionItem = useMemo(() => {
     const groupName = (gid?: string) => groups.find((g) => g.id === gid)?.name;
-    const out: Item[] = [];
-    // Sessions.
-    for (const s of sessions) {
+    return (s: Session): Item => {
       const g = groupName(s.groupId);
       const proto = (PROTO_LABELS[s.type] || s.type).toUpperCase();
       const subtitleParts = [proto];
       if (s.user) subtitleParts.push(s.user);
       if (s.host) subtitleParts.push(s.host);
       if (g) subtitleParts.push('· ' + g);
-      out.push({
+      return {
         id: 'session:' + s.id,
         title: s.label || s.host || '(unnamed)',
         subtitle: subtitleParts.join(' · '),
         proto: s.type,
         action: { kind: 'open-session', session: s },
-      });
+      };
+    };
+  }, [groups]);
+
+  const workspaceItem = (name: string): Item => ({
+    id: 'workspace:' + name,
+    title: name,
+    subtitle: 'WORKSPACE',
+    action: { kind: 'load-workspace', name },
+  });
+
+  // Static actions — always available, fuzzy-searchable, and appended below
+  // the recents in the empty-query view.
+  const actionItems: Item[] = useMemo(
+    () => [
+      { id: 'action:new-session', title: 'New Session…', subtitle: 'ACTION', action: { kind: 'new-session' } },
+      { id: 'action:save-workspace', title: 'Save Current Workspace…', subtitle: 'ACTION', action: { kind: 'save-workspace' } },
+      { id: 'action:manage-workspaces', title: 'Manage Workspaces…', subtitle: 'ACTION', action: { kind: 'manage-workspaces' } },
+    ],
+    [],
+  );
+
+  // Full corpus used when the user is typing: every session + workspace + action.
+  const items: Item[] = useMemo(
+    () => [...sessions.map(sessionItem), ...workspaces.map((w) => workspaceItem(w.name)), ...actionItems],
+    [sessions, workspaces, sessionItem, actionItems],
+  );
+
+  // Recents view (empty query): resolve the MRU newest-first, dropping refs
+  // whose target no longer exists / no longer parses, capped to a handful.
+  const recentItems: Item[] = useMemo(() => {
+    const out: Item[] = [];
+    for (const r of recents) {
+      if (out.length >= RECENTS_SHOWN) break;
+      if (r.kind === 'session') {
+        const s = sessions.find((x) => x.id === r.id);
+        if (s) out.push(sessionItem(s));
+      } else if (r.kind === 'workspace') {
+        if (workspaces.some((w) => w.name === r.name)) out.push(workspaceItem(r.name));
+      } else {
+        const parsed = parseQuickConnect(r.cmd);
+        if (parsed.ok) {
+          const d = parsed.draft;
+          out.push({
+            id: 'quick:' + r.cmd,
+            title: d.label,
+            subtitle: `${(PROTO_LABELS[d.type] || d.type).toUpperCase()} · quick connect`,
+            proto: d.type,
+            action: { kind: 'quick-connect', draft: d },
+          });
+        }
+      }
     }
-    // Workspaces.
-    for (const w of workspaces) {
-      out.push({
-        id: 'workspace:' + w.name,
-        title: w.name,
-        subtitle: 'WORKSPACE',
-        action: { kind: 'load-workspace', name: w.name },
-      });
-    }
-    // Static actions.
-    out.push({
-      id: 'action:new-session',
-      title: 'New Session…',
-      subtitle: 'ACTION',
-      action: { kind: 'new-session' },
-    });
-    out.push({
-      id: 'action:save-workspace',
-      title: 'Save Current Workspace…',
-      subtitle: 'ACTION',
-      action: { kind: 'save-workspace' },
-    });
-    out.push({
-      id: 'action:manage-workspaces',
-      title: 'Manage Workspaces…',
-      subtitle: 'ACTION',
-      action: { kind: 'manage-workspaces' },
-    });
     return out;
-  }, [sessions, groups, workspaces]);
+  }, [recents, sessions, workspaces, sessionItem]);
+
+  // A leading `!` switches the palette into command mode: instead of fuzzy
+  // searching saved sessions, we parse the line as a quick-connect command
+  // (!ssh / !sftp / !ftp) and offer a one-shot temporary connection.
+  const commandMode = query.trimStart().startsWith('!');
+  const quick = useMemo(
+    () => (commandMode ? parseQuickConnect(query) : null),
+    [commandMode, query],
+  );
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return items;
+    if (commandMode) {
+      if (quick && quick.ok) {
+        const d = quick.draft;
+        const sub = [
+          (PROTO_LABELS[d.type] || d.type).toUpperCase(),
+          `port ${d.port}`,
+          d.pemFile ? `key ${d.pemFile}` : null,
+          'temporary',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        return [
+          {
+            id: 'quick:connect',
+            title: `Quick connect — ${d.label}`,
+            subtitle: sub,
+            proto: d.type,
+            action: { kind: 'quick-connect', draft: d } as PaletteAction,
+          },
+        ];
+      }
+      return [];
+    }
+    if (!query.trim()) {
+      // Empty query → recents (newest-first) plus the static actions. Fall
+      // back to the full list on a fresh profile with no history yet.
+      return recentItems.length ? [...recentItems, ...actionItems] : items;
+    }
     const q = query.toLowerCase();
     const scored: { item: Item; score: number }[] = [];
     for (const it of items) {
@@ -100,7 +170,7 @@ export function CommandPalette({ sessions, groups, workspaces, onClose, onPick }
     }
     scored.sort((a, b) => b.score - a.score);
     return scored.map((s) => s.item);
-  }, [items, query]);
+  }, [items, recentItems, actionItems, query, commandMode, quick]);
 
   // Clamp cursor on filtered length change.
   useEffect(() => {
@@ -149,14 +219,21 @@ export function CommandPalette({ sessions, groups, workspaces, onClose, onPick }
               setQuery(e.target.value);
               setCursor(0);
             }}
-            placeholder="Search sessions, workspaces, actions…"
+            placeholder="Search sessions, workspaces, actions… or !ssh user@host"
             autoFocus
             style={input}
           />
           <span style={hintBox}>↑↓ ⏎ Esc</span>
         </div>
         <div ref={listRef} style={listStyle}>
-          {filtered.length === 0 && <div style={emptyMsg}>No matches.</div>}
+          {filtered.length === 0 &&
+            (commandMode ? (
+              <div style={emptyMsg}>
+                {quick && !quick.ok ? quick.error : 'Type a quick-connect command.'}
+              </div>
+            ) : (
+              <div style={emptyMsg}>No matches.</div>
+            ))}
           {filtered.map((it, i) => (
             <div
               key={it.id}
@@ -165,7 +242,11 @@ export function CommandPalette({ sessions, groups, workspaces, onClose, onPick }
               onClick={() => onPick(it.action)}
               style={rowStyle(i === cursor)}
             >
-              {it.proto && <ProtoIcon kind={it.proto} size={ICON.sm} />}
+              {it.proto ? (
+                <ProtoIcon kind={it.proto} size={ICON.sm} flash={it.action.kind === 'quick-connect'} />
+              ) : it.action.kind === 'load-workspace' ? (
+                <WorkspaceGlyph />
+              ) : null}
               <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
                 <span
                   style={{
@@ -200,6 +281,26 @@ export function CommandPalette({ sessions, groups, workspaces, onClose, onPick }
         </div>
       </div>
     </div>
+  );
+}
+
+// Bookmark glyph for workspace rows (matches the new-tab RecentList).
+function WorkspaceGlyph() {
+  return (
+    <svg
+      width={ICON.sm}
+      height={ICON.sm}
+      viewBox="0 0 16 16"
+      fill="none"
+      style={{ color: TOKENS.accent, flex: '0 0 auto' }}
+    >
+      <path
+        d="M4.5 3.5 A1.5 1.5 0 0 1 6 2 H10 A1.5 1.5 0 0 1 11.5 3.5 V14 L8 11.3 L4.5 14 Z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 

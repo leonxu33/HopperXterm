@@ -36,6 +36,9 @@ type Props = {
   onRename?: (id: string, newName: string) => void;
   onContextMenu?: (tabId: string, x: number, y: number) => void;
   onDropSession?: (sessionId: string) => void;
+  // Ids of tabs that hold a temporary (quick-connect) pane. Such tabs show the
+  // ⚡ badge and are merge-blocked. Derived once by the parent.
+  tempTabIds?: ReadonlySet<string>;
   // Bumped by the parent (F2) to start renaming the active tab inline.
   renameTick?: number;
 };
@@ -52,8 +55,10 @@ export function TabBar({
   onRename,
   onContextMenu,
   onDropSession,
+  tempTabIds,
   renameTick,
 }: Props) {
+  const tabHasTemp = (t: Tab) => !!tempTabIds && tempTabIds.has(t.id);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dropAt, setDropAt] = useState<{ idx: number; side: Side } | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -103,6 +108,7 @@ export function TabBar({
         const showAfter = dropAt && dropAt.idx === i && dropAt.side === 'after';
         const isMergeTarget = dropAt && dropAt.idx === i && dropAt.side === 'merge';
         const paneN = countPanes(t.layout);
+        const isTemp = tabHasTemp(t);
 
         return (
           <Fragment key={t.id}>
@@ -135,7 +141,14 @@ export function TabBar({
                 const r = e.currentTarget.getBoundingClientRect();
                 const frac = (e.clientX - r.left) / r.width;
                 const dragged = tabs[dragIdx];
-                const mergeBlocked = !!(dragged?.isFileTab || t.isFileTab) || !onMerge;
+                // File tabs never merge; temporary (quick-connect) tabs are
+                // kept standalone too, so they stay a single throwaway pane
+                // (and never get tangled into a saved tab's layout).
+                const mergeBlocked =
+                  !!(dragged?.isFileTab || t.isFileTab) ||
+                  (dragged ? tabHasTemp(dragged) : false) ||
+                  tabHasTemp(t) ||
+                  !onMerge;
                 let side: Side;
                 if (i === dragIdx) {
                   setDropAt(null);
@@ -158,15 +171,19 @@ export function TabBar({
               }}
               onDragEnd={clearDrag}
               onDrop={(e) => {
-                // Session drop → open new tab.
+                // Session drop → open new tab. stopPropagation so the drop
+                // isn't also handled by the tab-bar container's onDrop, which
+                // would open a SECOND tab for the same session.
                 const sessionId = e.dataTransfer.getData('application/x-hopper-session');
                 if (sessionId && onDropSession && dragIdx === null) {
                   e.preventDefault();
+                  e.stopPropagation();
                   onDropSession(sessionId);
                   return;
                 }
                 if (dragIdx === null) return;
                 e.preventDefault();
+                e.stopPropagation();
                 if (dropAt) {
                   if (dropAt.side === 'merge') {
                     onMerge?.(tabs[dragIdx].id, t.id);
@@ -217,6 +234,15 @@ export function TabBar({
                   }}
                 >
                   {t.label}
+                </span>
+              )}
+              {isTemp && !renaming && (
+                <span
+                  style={tempBadge(active)}
+                  data-tip="Temporary — not saved"
+                  aria-label="Temporary session"
+                >
+                  ⚡
                 </span>
               )}
               {paneN > 1 && !renaming && (
@@ -407,6 +433,16 @@ function pillStyle(active: boolean): CSSProperties {
     color: active ? TOKENS.accent : TOKENS.fgDim,
     flex: '0 0 auto',
     letterSpacing: '.04em',
+  };
+}
+
+function tempBadge(active: boolean): CSSProperties {
+  return {
+    font: `${FS.xs}px/1 ${TOKENS.font}`,
+    flex: '0 0 auto',
+    opacity: active ? 0.95 : 0.65,
+    filter: 'saturate(1.2)',
+    cursor: 'default',
   };
 }
 

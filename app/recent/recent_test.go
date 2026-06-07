@@ -4,6 +4,7 @@ import "testing"
 
 func sess(id string) Ref      { return Ref{Kind: "session", ID: id} }
 func ws(name string) Ref      { return Ref{Kind: "workspace", Name: name} }
+func quick(cmd string) Ref    { return Ref{Kind: "quick", Cmd: cmd} }
 
 func keys(items []Ref) []string {
 	out := make([]string, len(items))
@@ -67,6 +68,33 @@ func TestPush_IgnoresInvalid(t *testing.T) {
 	got, _ = s.Push(Ref{Kind: "bogus", ID: "x"})
 	if len(got) != 1 {
 		t.Errorf("unknown kind should be ignored, got %v", keys(got))
+	}
+}
+
+func TestPush_QuickConnect(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	_, _ = s.Push(quick("!ssh u@host -p 2222"))
+	_, _ = s.Push(sess("a"))
+	// Same command re-fired dedupes to the front; a different command is distinct.
+	got, _ := s.Push(quick("!ssh u@host -p 2222"))
+	want := []string{"quick:!ssh u@host -p 2222", "session:a"}
+	if !eq(keys(got), want) {
+		t.Errorf("quick dedup got %v want %v", keys(got), want)
+	}
+	got, _ = s.Push(quick("!ftp other"))
+	if len(got) != 3 {
+		t.Errorf("distinct quick command should be a new entry, got %v", keys(got))
+	}
+	// An empty command is invalid and ignored.
+	got, _ = s.Push(Ref{Kind: "quick"})
+	if len(got) != 3 {
+		t.Errorf("empty quick cmd should be ignored, got %v", keys(got))
+	}
+	// Survives a reload.
+	s2, _ := Open(dir)
+	if !eq(keys(s2.List()), keys(got)) {
+		t.Errorf("quick reload got %v want %v", keys(s2.List()), keys(got))
 	}
 }
 
