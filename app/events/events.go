@@ -217,3 +217,20 @@ func EmitHostKeyChanged(ctx context.Context, paneID, sessionID, host, oldFP, new
 		NewFingerprint: newFP,
 	})
 }
+
+// UpdateProgressPayload reports an in-flight self-update. State progresses
+// downloading → installing → error. Bytes accumulates as the installer
+// downloads; Total is the asset's size (0 if the server omitted it). This is
+// an app-global event (no paneId) — there's only ever one update in flight.
+type UpdateProgressPayload struct {
+	State string `json:"state"` // "downloading" | "installing" | "error"
+	Bytes int64  `json:"bytes"`
+	Total int64  `json:"total"`
+	Error string `json:"error,omitempty"`
+}
+
+// EmitUpdateProgress emits a self-update progress tick on the global
+// "update:progress" event.
+func EmitUpdateProgress(ctx context.Context, p UpdateProgressPayload) {
+	safeEmit(ctx, "update:progress", p)
+}

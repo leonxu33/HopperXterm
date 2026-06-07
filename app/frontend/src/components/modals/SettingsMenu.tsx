@@ -11,11 +11,12 @@ type Props = {
   onImport: () => void;
   onShortcuts: () => void;
   onCustomKeys: () => void;
+  onCheckUpdates: () => void;
   onAbout: () => void;
   onClose: () => void;
 };
 
-export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustomKeys, onAbout, onClose }: Props) {
+export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustomKeys, onCheckUpdates, onAbout, onClose }: Props) {
   const ref = useAnchoredDismiss(anchor, onClose);
 
   if (!anchor) return null;
@@ -46,7 +47,7 @@ export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustom
       <div style={headerStyle}>Configuration</div>
 
       <MenuRow
-        label="Export configuration…"
+        label="Export configuration"
         onClick={onExport}
         icon={
           <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
@@ -56,7 +57,7 @@ export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustom
         }
       />
       <MenuRow
-        label="Import configuration…"
+        label="Import configuration"
         onClick={onImport}
         icon={
           <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
@@ -69,7 +70,7 @@ export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustom
       <div style={headerStyle}>Terminal</div>
 
       <MenuRow
-        label="Custom shortcuts…"
+        label="Custom shortcuts"
         onClick={onCustomKeys}
         icon={
           <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
@@ -93,6 +94,17 @@ export function SettingsMenu({ anchor, onExport, onImport, onShortcuts, onCustom
               strokeWidth="1.2"
               strokeLinecap="round"
             />
+          </svg>
+        }
+      />
+
+      <MenuRow
+        label="Check for updates"
+        onClick={onCheckUpdates}
+        icon={
+          <svg width={ICON.md} height={ICON.md} viewBox="0 0 16 16" fill="none">
+            <path d="M13.5 8 A5.5 5.5 0 1 1 11.7 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            <path d="M13.5 2 V5 H10.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         }
       />
