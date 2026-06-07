@@ -27,6 +27,7 @@ export function RecordMacroModal({ onCancel, onSave }: Props) {
   const bufferRef = useRef<string[]>([]);
   const trimmed = name.trim();
   const keystrokes = preview; // preview mirrors the joined capture buffer
+  const empty = keystrokes.length === 0;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -80,6 +81,15 @@ export function RecordMacroModal({ onCancel, onSave }: Props) {
     if (trimmed && keystrokes.length > 0) onSave(trimmed, keystrokes);
   };
 
+  // Discard everything captured so far and start over without leaving the
+  // dialog. Resets the capture buffer + preview and wipes the local echo.
+  const clear = () => {
+    bufferRef.current = [];
+    setPreview('');
+    termRef.current?.reset();
+    termRef.current?.focus();
+  };
+
   return (
     <Modal
       title="Record macro"
@@ -96,8 +106,21 @@ export function RecordMacroModal({ onCancel, onSave }: Props) {
       }}
       footer={
         <>
+          <button
+            type="button"
+            onClick={clear}
+            disabled={empty}
+            data-tip="Discard captured keystrokes"
+            style={clearBtnStyle(empty)}
+          >
+            <svg width={ICON.sm} height={ICON.sm} viewBox="0 0 14 14" fill="none">
+              <path d="M2 4 H12 M5 4 V2.5 H9 V4 M3.5 4 L4 12 H10 L10.5 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Clear
+          </button>
+          <div style={{ flex: 1 }} />
           <GhostButton onClick={onCancel}>Cancel</GhostButton>
-          <PrimaryButton onClick={submit} disabled={!trimmed || keystrokes.length === 0}>
+          <PrimaryButton onClick={submit} disabled={!trimmed || empty}>
             Save macro
           </PrimaryButton>
         </>
@@ -131,6 +154,22 @@ export function RecordMacroModal({ onCancel, onSave }: Props) {
       </Field>
     </Modal>
   );
+}
+
+function clearBtnStyle(disabled: boolean): React.CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '8px 12px',
+    background: 'rgba(255,255,255,0.06)',
+    color: disabled ? TOKENS.fgMute : TOKENS.fgDim,
+    border: 0,
+    borderRadius: 8,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    font: `500 ${FS.lg}px/1 ${TOKENS.font}`,
+    opacity: disabled ? 0.5 : 1,
+  };
 }
 
 const previewStyle: React.CSSProperties = {
