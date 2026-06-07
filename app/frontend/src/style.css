@@ -76,6 +76,21 @@ html[data-platform="linux"] .hx-window-round {
   border-radius: 10px;
 }
 
+/* Number inputs (the New Session port field) — hide the native up/down
+   spinner buttons. The OS-drawn spinners don't match the dark glass theme,
+   and the field validates numerically on submit, so the bare themed input is
+   enough. Covers WebKit/Blink (WebView2, WKWebView) + Firefox-family engines. */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
 /* Universal button press effect */
 button {
   transition: transform 0.08s ease, filter 0.12s ease;

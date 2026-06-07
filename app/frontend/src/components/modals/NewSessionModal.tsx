@@ -352,6 +352,10 @@ export function NewSessionModal({
           display: 'flex',
           gap: 8,
           overflowX: 'auto',
+          // overflow-x:auto computes overflow-y to auto too, so the active
+          // tile's translateY(-2px) lift + its inset highlight ring would be
+          // clipped at the top edge. Pad both axes to give the ring room.
+          paddingTop: 6,
           paddingBottom: 6,
         }}
       >
