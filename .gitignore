@@ -1,5 +1,7 @@
 # Build outputs
 app/build/bin/
+# Wails-generated installer helper — regenerated from wails.json on every build
+app/build/windows/installer/wails_tools.nsh
 app/frontend/dist/*
 !app/frontend/dist/gitkeep
 app/frontend/wailsjs/
