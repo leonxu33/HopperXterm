@@ -15,7 +15,10 @@ export function ShortcutsModal({ onClose }: { onClose: () => void }) {
       onClose={onClose}
       iconTile={{ color: TOKENS.accent, icon: KEYBOARD_ICON }}
     >
-      <div style={{ maxHeight: '64vh', overflowY: 'auto' }}>
+      {/* Reserve a 10px gutter so the right-aligned keycaps don't sit under the
+          scrollbar (overlays content on macOS/Linux). Negative margin pulls it
+          into the Modal body's padding so alignment is unchanged. */}
+      <div style={{ maxHeight: '64vh', overflowY: 'auto', paddingRight: 10, marginRight: -10 }}>
         {getShortcutSections().map((section) => (
           <SectionBlock key={section.title} section={section} />
         ))}
