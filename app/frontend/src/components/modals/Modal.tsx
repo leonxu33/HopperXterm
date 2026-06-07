@@ -512,13 +512,10 @@ function DropdownMenu({
           >
             <span
               // Only surface a tooltip when the label is actually clipped —
-              // a native title on every row reads as noise. Set it lazily on
-              // hover (before the tooltip's show delay elapses) by comparing
-              // the text's scroll vs client width.
-              onMouseEnter={(e) => {
-                const el = e.currentTarget;
-                el.title = el.scrollWidth > el.clientWidth ? it.label : '';
-              }}
+              // a tip on every row reads as noise. `data-tip-overflow` lets the
+              // themed TooltipHost show the row's own text, and only when it's
+              // truncated (never a bare native OS title).
+              data-tip-overflow
               style={{
                 flex: 1,
                 overflow: 'hidden',
