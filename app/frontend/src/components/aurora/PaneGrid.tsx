@@ -339,6 +339,11 @@ type RenderCtx = {
   hover: { paneId: string; zone: DropZone } | null;
   setHover: (paneId: string, zone: DropZone) => void;
   clearHover: (paneId: string) => void;
+  // Id of the pane currently being dragged (null when no pane drag is active).
+  // Tracked here rather than read from dataTransfer because getData() is
+  // unavailable during dragover in WebView2/Chromium.
+  draggingPaneId: string | null;
+  setDraggingPane: (id: string | null) => void;
   startResize: (
     e: React.MouseEvent,
     path: number[],
@@ -439,8 +444,12 @@ export function PaneGrid({
   // document force-clear it when the drag finishes (success or cancel) so the
   // halo can't stick. Both events fire on the drag source and bubble up.
   const [dropHover, setDropHover] = useState<{ paneId: string; zone: DropZone } | null>(null);
+  const [draggingPaneId, setDraggingPaneId] = useState<string | null>(null);
   useEffect(() => {
-    const clear = () => setDropHover(null);
+    const clear = () => {
+      setDropHover(null);
+      setDraggingPaneId(null);
+    };
     document.addEventListener('dragend', clear);
     document.addEventListener('drop', clear);
     return () => {
@@ -514,6 +523,8 @@ export function PaneGrid({
     hover: dropHover,
     setHover: (paneId, zone) => setDropHover({ paneId, zone }),
     clearHover: (paneId) => setDropHover((d) => (d && d.paneId === paneId ? null : d)),
+    draggingPaneId,
+    setDraggingPane: setDraggingPaneId,
     startResize,
   };
 
@@ -640,10 +651,11 @@ function PaneCellView({ leaf, ctx }: { leaf: PaneLeaf; ctx: RenderCtx }) {
     ) {
       return true;
     }
-    // Disallow dropping a pane onto itself.
-    if (hasType(e, 'application/x-hopper-pane')) {
-      const src = e.dataTransfer.getData('application/x-hopper-pane');
-      if (src && src === leaf.id && zone === 'center') return true;
+    // Disallow dropping a pane onto its own cell. Every zone is a no-op there
+    // (App's onDropOnPane bails when source === target), so forbid them all so
+    // no drop highlight appears while dragging a pane within its own area.
+    if (hasType(e, 'application/x-hopper-pane') && ctx.draggingPaneId === leaf.id) {
+      return true;
     }
     return false;
   };
@@ -713,6 +725,8 @@ function PaneCellView({ leaf, ctx }: { leaf: PaneLeaf; ctx: RenderCtx }) {
           active={active}
           canSplit={!atMax && !ctx.locked}
           canDrag={ctx.multiPane}
+          onDragStartPane={() => ctx.setDraggingPane(leaf.id)}
+          onDragEndPane={() => ctx.setDraggingPane(null)}
           onSplitRight={ctx.onSplitRight ? () => ctx.onSplitRight!(leaf.id) : undefined}
           onSplitDown={ctx.onSplitDown ? () => ctx.onSplitDown!(leaf.id) : undefined}
           onReloadPane={ctx.onReloadPane ? () => ctx.onReloadPane!(leaf.id) : undefined}
@@ -837,6 +851,8 @@ function PaneHeader({
   active,
   canSplit,
   canDrag,
+  onDragStartPane,
+  onDragEndPane,
   onSplitRight,
   onSplitDown,
   onReloadPane,
@@ -851,6 +867,8 @@ function PaneHeader({
   // Pane-to-pane drag only makes sense with ≥2 panes; a lone pane has
   // nothing to rearrange, so it's non-draggable (no grab cursor either).
   canDrag: boolean;
+  onDragStartPane?: () => void;
+  onDragEndPane?: () => void;
   onSplitRight?: () => void;
   onSplitDown?: () => void;
   onReloadPane?: () => void;
@@ -901,7 +919,9 @@ function PaneHeader({
           e.dataTransfer.setData('text/plain', `pane:${paneId}`);
         } catch {}
         e.dataTransfer.effectAllowed = 'move';
+        onDragStartPane?.();
       }}
+      onDragEnd={() => onDragEndPane?.()}
       style={{
         position: 'absolute',
         top: 0,

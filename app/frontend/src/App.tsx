@@ -1169,15 +1169,13 @@ function App() {
       // into (or absorb one onto) a saved tab. The TabBar already blocks the
       // drop UI; this is a defensive backstop.
       if (tempTabIds.has(source.id) || tempTabIds.has(target.id)) return cur;
-      const targetCount = paneCount(target.layout);
-      const room = PANE_LIMIT - targetCount;
-      if (room <= 0) return cur;
-      const sourceCells = paneLeaves(source.layout);
-      const keep = sourceCells.slice(0, room);
-      const drop = sourceCells.slice(room);
-      for (const c of drop) void ClosePane(c.id);
+      // Never exceed PANE_LIMIT. We refuse the whole merge rather than dropping
+      // panes to fit — the cap of 6 panes/tab is always preserved, and no live
+      // pane is silently closed. The TabBar disables the merge zone for this
+      // case; this is the backstop.
+      if (paneCount(source.layout) + paneCount(target.layout) > PANE_LIMIT) return cur;
       let layout = target.layout;
-      for (const c of keep) {
+      for (const c of paneLeaves(source.layout)) {
         layout = appendLeaf(layout, { kind: 'leaf', id: c.id, sessionId: c.sessionId, weight: 1 });
       }
       const next = cur
@@ -1191,6 +1189,47 @@ function App() {
       delete out[sourceTabId];
       return out;
     });
+  };
+
+  // Inverse of mergeTabs: a pane dragged out of a multi-pane tab and dropped on
+  // the tab bar pops into its own new tab. Backend pane bindings are keyed by
+  // paneId, so the live connection is untouched — we just move the leaf out of
+  // the source tab's layout and into a fresh single-pane tab.
+  const detachPaneToNewTab = (paneId: string) => {
+    const source = tabs.find((t) => findLeaf(t.layout, paneId));
+    if (!source) return;
+    const leaf = findLeaf(source.layout, paneId);
+    if (!leaf) return;
+    // A single-pane tab is already "its own tab" — nothing to detach.
+    if (paneCount(source.layout) <= 1) return;
+    // Temporary (quick-connect) tabs stay single-pane, so this never applies;
+    // defensive backstop mirroring mergeTabs.
+    if (tempTabIds.has(source.id)) return;
+
+    const s = sessionById(leaf.sessionId);
+    const newTab: Tab = {
+      id: newId('tab'),
+      sessionId: leaf.sessionId,
+      type: s?.type || 'shell',
+      label: s?.label || s?.host || 'session',
+      state: paneStates[paneId] || null,
+      layout: singleLeafLayout(paneId, leaf.sessionId),
+      isFileTab: isFileOnly(s?.type),
+    };
+    setTabs((cur) =>
+      cur
+        .map((t) => (t.id === source.id ? { ...t, layout: removeLeaf(t.layout, paneId) } : t))
+        .concat(newTab),
+    );
+    setActivePaneByTab((cur) => {
+      const out = { ...cur };
+      const survivor = nextLeafAfterRemoval(source.layout, paneId, out[source.id] ?? null);
+      if (survivor == null) delete out[source.id];
+      else out[source.id] = survivor;
+      out[newTab.id] = paneId;
+      return out;
+    });
+    setActiveTabId(newTab.id);
   };
 
   const closeTab = async (tabId: string) => {
@@ -2231,6 +2270,7 @@ function App() {
                 renameTick={tabRenameTick}
                 onContextMenu={(tabId, x, y) => setTabCtxMenu({ tabId, x, y })}
                 onDropSession={openSessionById}
+                onDetachPane={detachPaneToNewTab}
                 tempTabIds={tempTabIds}
               />
               <ToolBtn

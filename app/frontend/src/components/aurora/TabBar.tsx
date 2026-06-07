@@ -6,7 +6,7 @@ import { useState, useEffect, useRef, Fragment } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent, RefObject } from 'react';
 import { ICON, FS, TOKENS } from '../../theme';
 import { ProtoIcon } from './ProtoIcon';
-import { paneCount, type PaneLayout } from './PaneGrid';
+import { paneCount, PANE_LIMIT, type PaneLayout } from './PaneGrid';
 
 export type PaneState = 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected';
 
@@ -36,6 +36,10 @@ type Props = {
   onRename?: (id: string, newName: string) => void;
   onContextMenu?: (tabId: string, x: number, y: number) => void;
   onDropSession?: (sessionId: string) => void;
+  // Pane dragged out of a multi-pane tab and dropped on the tab bar → pop it
+  // into its own new tab. Payload is the pane id (backend bindings are keyed
+  // by pane id, so the live connection is untouched).
+  onDetachPane?: (paneId: string) => void;
   // Ids of tabs that hold a temporary (quick-connect) pane. Such tabs show the
   // ⚡ badge and are merge-blocked. Derived once by the parent.
   tempTabIds?: ReadonlySet<string>;
@@ -55,6 +59,7 @@ export function TabBar({
   onRename,
   onContextMenu,
   onDropSession,
+  onDetachPane,
   tempTabIds,
   renameTick,
 }: Props) {
@@ -62,6 +67,14 @@ export function TabBar({
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dropAt, setDropAt] = useState<{ idx: number; side: Side } | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
+  // True while a pane is being dragged over the tab bar (shows the detach hint).
+  const [paneDropOver, setPaneDropOver] = useState(false);
+  // Stable geometry of the tab currently under the cursor, captured once on
+  // arrival. The before/after/merge zone is measured against this rather than a
+  // live getBoundingClientRect — otherwise the chosen zone's own feedback (the
+  // "Merge" pill widening the tab, or the inserted drop line shifting it) moves
+  // the measurement basis and the zone oscillates at the boundary.
+  const tabMeasureRef = useRef<{ idx: number; left: number; width: number } | null>(null);
 
   // F2 from the parent: begin inline rename of the active tab.
   useEffect(() => {
@@ -71,6 +84,8 @@ export function TabBar({
   const clearDrag = () => {
     setDragIdx(null);
     setDropAt(null);
+    setPaneDropOver(false);
+    tabMeasureRef.current = null;
   };
 
   return (
@@ -84,19 +99,115 @@ export function TabBar({
         flex: '1 1 auto',
         minWidth: 0,
       }}
+      onDragEnter={(e) => {
+        // A drop target must cancel BOTH dragenter and dragover. Without this,
+        // the cursor snaps to 🚫 every time the pointer crosses into a new child
+        // element (a tab's icon/label/pill/close button, or the inter-tab gaps),
+        // because that child's fresh dragenter goes uncancelled until the next
+        // dragover — the move ↔ disable cursor jitter. dragenter bubbles, so one
+        // handler here covers the whole bar; cancel for any payload it accepts.
+        const t = e.dataTransfer.types;
+        const sessionDrag = t.includes('application/x-hopper-session');
+        const paneDrag = t.includes('application/x-hopper-pane');
+        if (
+          (sessionDrag && onDropSession) ||
+          (paneDrag && onDetachPane && dragIdx === null) ||
+          (dragIdx !== null && onReorder)
+        ) {
+          e.preventDefault();
+        }
+      }}
       onDragOver={(e) => {
         // Allow dropping a sidebar session anywhere on the empty area of the tab bar.
-        if (!onDropSession) return;
-        if (!e.dataTransfer.types.includes('application/x-hopper-session')) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'copy';
+        if (onDropSession && e.dataTransfer.types.includes('application/x-hopper-session')) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          return;
+        }
+        // A pane dragged out of a multi-pane tab → detach into its own new tab.
+        // Only when this isn't a tab-reorder drag (dragIdx === null).
+        if (
+          onDetachPane &&
+          dragIdx === null &&
+          e.dataTransfer.types.includes('application/x-hopper-pane')
+        ) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          if (!paneDropOver) setPaneDropOver(true);
+          return;
+        }
+        // Tab-reorder drag passing over dead space — the inter-tab gaps or the
+        // empty strip after the last tab. The per-tab handlers own on-tab
+        // positioning (target !== currentTarget there); here we keep the whole
+        // bar a valid drop target so the cursor stays "move" (not the native
+        // 🚫) and snap the drop indicator to the nearest slot.
+        if (dragIdx !== null && onReorder && e.target === e.currentTarget) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          const els = Array.from(
+            e.currentTarget.querySelectorAll<HTMLElement>('[data-tab-idx]'),
+          );
+          let slot = els.length; // default: past the last tab
+          for (const el of els) {
+            const r = el.getBoundingClientRect();
+            if (e.clientX < r.left + r.width / 2) {
+              slot = Number(el.dataset.tabIdx);
+              break;
+            }
+          }
+          // `slot` is the index to insert before. Collapse the in-place no-ops
+          // the per-tab handler also skips (dropping just before/after itself).
+          if (slot === dragIdx || slot === dragIdx + 1) {
+            setDropAt(null);
+          } else if (slot >= els.length) {
+            setDropAt({ idx: els.length - 1, side: 'after' });
+          } else {
+            setDropAt({ idx: slot, side: 'before' });
+          }
+        }
+      }}
+      onDragLeave={(e) => {
+        // Only act once the pointer actually leaves the tab-bar bounds —
+        // crossing between child tabs fires dragleave too.
+        const r = e.currentTarget.getBoundingClientRect();
+        const outside =
+          e.clientX <= r.left ||
+          e.clientX >= r.right ||
+          e.clientY <= r.top ||
+          e.clientY >= r.bottom;
+        if (!outside) return;
+        if (paneDropOver) setPaneDropOver(false);
+        // Drop the cached tab geometry so re-entering recaptures a fresh,
+        // natural-size rect.
+        tabMeasureRef.current = null;
       }}
       onDrop={(e) => {
-        if (!onDropSession) return;
-        const id = e.dataTransfer.getData('application/x-hopper-session');
-        if (id) {
+        setPaneDropOver(false);
+        if (onDropSession) {
+          const id = e.dataTransfer.getData('application/x-hopper-session');
+          if (id) {
+            e.preventDefault();
+            onDropSession(id);
+            return;
+          }
+        }
+        if (onDetachPane && dragIdx === null) {
+          const pid = e.dataTransfer.getData('application/x-hopper-pane');
+          if (pid) {
+            e.preventDefault();
+            onDetachPane(pid);
+            return;
+          }
+        }
+        // Tab-reorder drop landing in dead space (per-tab drops stopPropagation,
+        // so this only fires for the gaps / trailing strip). Uses the slot the
+        // dragover computed into dropAt.
+        if (dragIdx !== null && onReorder && dropAt && dropAt.side !== 'merge') {
           e.preventDefault();
-          onDropSession(id);
+          let to = dropAt.side === 'before' ? dropAt.idx : dropAt.idx + 1;
+          if (dragIdx < to) to -= 1;
+          if (to !== dragIdx) onReorder(dragIdx, to);
+          clearDrag();
         }
       }}
     >
@@ -107,13 +218,14 @@ export function TabBar({
         const showBefore = dropAt && dropAt.idx === i && dropAt.side === 'before';
         const showAfter = dropAt && dropAt.idx === i && dropAt.side === 'after';
         const isMergeTarget = dropAt && dropAt.idx === i && dropAt.side === 'merge';
-        const paneN = countPanes(t.layout);
+        const paneN = paneCount(t.layout);
         const isTemp = tabHasTemp(t);
 
         return (
           <Fragment key={t.id}>
             {showBefore && <TabDropLine />}
             <div
+              data-tab-idx={i}
               draggable={!renaming}
               onDragStart={(e) => {
                 if (renaming) return;
@@ -138,16 +250,31 @@ export function TabBar({
                 if (dragIdx === null) return;
                 e.preventDefault();
                 e.dataTransfer.dropEffect = 'move';
-                const r = e.currentTarget.getBoundingClientRect();
-                const frac = (e.clientX - r.left) / r.width;
+                // Measure against the tab's geometry as captured on arrival, not
+                // its live rect — see tabMeasureRef. Recapture when the hovered
+                // tab changes (the tab is still at its natural size then, before
+                // this frame's merge/line feedback is applied).
+                let m = tabMeasureRef.current;
+                if (!m || m.idx !== i) {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  m = { idx: i, left: r.left, width: r.width };
+                  tabMeasureRef.current = m;
+                }
+                const frac = (e.clientX - m.left) / m.width;
                 const dragged = tabs[dragIdx];
                 // File tabs never merge; temporary (quick-connect) tabs are
                 // kept standalone too, so they stay a single throwaway pane
-                // (and never get tangled into a saved tab's layout).
+                // (and never get tangled into a saved tab's layout). A merge
+                // that would exceed PANE_LIMIT is also blocked — we never drop
+                // panes to fit, so the whole merge is disabled (falls back to
+                // reorder); the cap of 6 panes/tab is always preserved.
                 const mergeBlocked =
                   !!(dragged?.isFileTab || t.isFileTab) ||
                   (dragged ? tabHasTemp(dragged) : false) ||
                   tabHasTemp(t) ||
+                  (dragged
+                    ? paneCount(dragged.layout) + paneCount(t.layout) > PANE_LIMIT
+                    : false) ||
                   !onMerge;
                 let side: Side;
                 if (i === dragIdx) {
@@ -289,6 +416,7 @@ export function TabBar({
           </Fragment>
         );
       })}
+      {paneDropOver && <PaneDetachHint />}
       {onNew && (
         <button
           ref={newBtnRef}
@@ -326,6 +454,35 @@ export function TabBar({
           </svg>
         </button>
       )}
+    </div>
+  );
+}
+
+// Transient chip shown at the end of the tab strip while a pane is dragged
+// over the bar — signals "drop here to pop this pane into a new tab".
+function PaneDetachHint() {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '7px 11px',
+        borderRadius: 9,
+        border: `1.5px dashed ${TOKENS.accent}`,
+        background: TOKENS.accentDim,
+        color: TOKENS.accent,
+        font: `600 ${FS.xs}px/1 ${TOKENS.font}`,
+        letterSpacing: '.02em',
+        flex: '0 0 auto',
+        whiteSpace: 'nowrap',
+        pointerEvents: 'none',
+      }}
+    >
+      <svg width={ICON.xs} height={ICON.xs} viewBox="0 0 12 12">
+        <path d="M6 2 V10 M2 6 H10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
+      New tab
     </div>
   );
 }
@@ -465,9 +622,6 @@ function stateDot(state: PaneState): CSSProperties {
   };
 }
 
-function countPanes(layout: PaneLayout): number {
-  return paneCount(layout);
-}
 
 const closeBtn: CSSProperties = {
   border: 0,
