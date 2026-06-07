@@ -15,11 +15,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { TOOLTIP_SURFACE } from './primitives';
+import { placeTooltip } from './tooltipPlacement';
 
 // Matches the wrapper Tooltip's cadence so hover timing feels uniform.
 const SHOW_DELAY = 350;
-const MARGIN = 8; // keep the tooltip at least this far from any viewport edge
-const GAP = 6; // distance between the trigger and the tooltip
 
 // Measure an element's full (unclipped) text width, in place, with a Range.
 // scrollWidth/clientWidth are integer-rounded, so a sub-pixel overflow — which
@@ -168,27 +167,15 @@ export function TooltipHost() {
   }, []);
 
   // Two-pass placement: the tooltip first renders offscreen (visibility:hidden)
-  // so we can measure its real size, then we clamp it fully inside the viewport.
-  // Without this, a fixed box positioned near the right edge gets squeezed into
-  // the few remaining pixels and wraps one character per line. Prefer BELOW the
-  // trigger (native cadence); flip above only when there isn't room below.
+  // so we can measure its real size, then placeTooltip clamps it fully inside
+  // the viewport. Without this, a fixed box positioned near the right edge gets
+  // squeezed into the few remaining pixels and wraps one character per line.
   useLayoutEffect(() => {
     if (!anchor || !tipRef.current) {
       setPos(null);
       return;
     }
-    const t = tipRef.current.getBoundingClientRect();
-    const r = anchor.rect;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    let left = r.left + r.width / 2 - t.width / 2;
-    left = Math.max(MARGIN, Math.min(vw - t.width - MARGIN, left));
-    const belowTop = r.bottom + GAP;
-    const aboveTop = r.top - GAP - t.height;
-    let top = belowTop;
-    if (belowTop + t.height > vh - MARGIN && aboveTop >= MARGIN) top = aboveTop;
-    top = Math.max(MARGIN, Math.min(vh - t.height - MARGIN, top));
-    setPos({ left, top });
+    setPos(placeTooltip(anchor.rect, tipRef.current.getBoundingClientRect()));
   }, [anchor]);
 
   if (!anchor) return null;

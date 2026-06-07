@@ -1,9 +1,10 @@
 // Shared visual primitives ported from hopperterm-core.jsx.
 // Each component mirrors the design exactly (sizes, colors, hover behavior).
-import React, { forwardRef, useEffect, useRef, useState } from 'react';
+import React, { forwardRef, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { CSSProperties, ReactNode, MouseEvent as ReactMouseEvent } from 'react';
 import { BTN, ICON, FS, TOKENS } from '../../theme';
+import { placeTooltip } from './tooltipPlacement';
 
 // ─── WithTip ────────────────────────────────────────────────────────────────
 // Wires a themed tooltip onto a button via the delegated TooltipHost. An
@@ -400,7 +401,11 @@ export function Tooltip({
   delay?: number;
 }) {
   const triggerRef = useRef<HTMLSpanElement | null>(null);
-  const [pos, setPos] = useState<{ x: number; y: number; above: boolean } | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
+  // The trigger rect captured when the tooltip opens; the layout effect below
+  // measures the rendered bubble against it and clamps into the viewport.
+  const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const showTimerRef = useRef<number | null>(null);
   const hideTimerRef = useRef<number | null>(null);
 
@@ -421,18 +426,12 @@ export function Tooltip({
   const scheduleShow = () => {
     if (!hasBody) return;
     cancelHide();
-    if (pos) return; // already visible
+    if (anchorRect) return; // already visible
     cancelShow();
     showTimerRef.current = window.setTimeout(() => {
       showTimerRef.current = null;
       if (!triggerRef.current) return;
-      const r = triggerRef.current.getBoundingClientRect();
-      const above = r.top > 140;
-      setPos({
-        x: r.left + r.width / 2,
-        y: above ? r.top - 6 : r.bottom + 6,
-        above,
-      });
+      setAnchorRect(triggerRef.current.getBoundingClientRect());
     }, delay);
   };
   // Short hide delay so moving the cursor from the trigger into the
@@ -442,9 +441,24 @@ export function Tooltip({
     cancelHide();
     hideTimerRef.current = window.setTimeout(() => {
       hideTimerRef.current = null;
-      setPos(null);
+      // Clearing anchorRect drives the layout effect to reset pos to null.
+      setAnchorRect(null);
     }, 120);
   };
+
+  // Two-pass placement: the bubble first renders offscreen (visibility:hidden)
+  // so we can measure its real size, then placeTooltip clamps it fully inside
+  // the viewport. Without the horizontal clamp, a centered bubble whose trigger
+  // sits near a viewport edge — e.g. the status bar's host label when the
+  // session bar is collapsed to its slim rail — overflows the edge and gets
+  // clipped.
+  useLayoutEffect(() => {
+    if (!anchorRect || !tipRef.current) {
+      setPos(null);
+      return;
+    }
+    setPos(placeTooltip(anchorRect, tipRef.current.getBoundingClientRect()));
+  }, [anchorRect]);
 
   useEffect(
     () => () => {
@@ -469,17 +483,19 @@ export function Tooltip({
       >
         {children}
       </span>
-      {pos &&
+      {anchorRect &&
         createPortal(
           <div
+            ref={tipRef}
             data-tooltip="true"
             onMouseEnter={cancelHide}
             onMouseLeave={scheduleHide}
             style={{
               ...TOOLTIP_SURFACE,
-              left: pos.x,
-              top: pos.y,
-              transform: `translate(-50%, ${pos.above ? '-100%' : '0'})`,
+              left: pos ? pos.left : 0,
+              top: pos ? pos.top : 0,
+              // Hidden during the measuring pass so the unclamped position never paints.
+              visibility: pos ? 'visible' : 'hidden',
               whiteSpace: 'pre',
               maxHeight: 360,
               overflow: 'auto',
