@@ -1,6 +1,8 @@
 # HopperXterm
 
-A fast, cross-platform SSH/SFTP terminal client for Windows, macOS, and Linux.
+A fast, cross-platform SSH/SFTP terminal GUI client for Windows, macOS, and Linux.
+
+![HopperXterm — multi-pane SSH sessions with a live remote file browser](assets/screenshot.png)
 
 ---
 
