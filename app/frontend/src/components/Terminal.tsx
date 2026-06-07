@@ -169,6 +169,40 @@ export function Terminal({
       .catch(() => {});
   }, []);
 
+  // (Re)create the WebGL renderer with a FRESH canvas. A newly-attached WebGL
+  // canvas renders crisp, but *resizing* an existing one leaves blurry text on
+  // fractional-devicePixelRatio displays (Windows display scaling) — which is
+  // why a just-split pane is sharp while the panes the split resized go blurry,
+  // and clearTextureAtlas() (a glyph-only rebuild) doesn't fix it. So after a
+  // resize settles we recreate the addon, returning to the known-crisp
+  // fresh-canvas state. Disposing first keeps the live WebGL context count flat
+  // (never exceeds the WebView's ~16 cap). Falls back to the DOM renderer if
+  // WebGL is unavailable. onContextLoss is a belt-and-suspenders fallback.
+  const remountWebgl = useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+    try {
+      webglRef.current?.dispose();
+    } catch {
+      /* already disposed — ignore */
+    }
+    webglRef.current = null;
+    try {
+      const w = new WebglAddon();
+      w.onContextLoss(() => {
+        try {
+          w.dispose();
+        } catch {}
+        if (webglRef.current === w) webglRef.current = null;
+      });
+      term.loadAddon(w);
+      webglRef.current = w;
+    } catch {
+      // WebGL unavailable — xterm.js stays on the DOM renderer.
+      webglRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -436,14 +470,16 @@ export function Terminal({
       try {
         fit.fit();
         pushPtySize(term.cols, term.rows);
-        // Force the WebGL renderer to clear its texture atlas and redraw.
-        // After a resize the GPU renderer can leave stale/ghosted rows behind
-        // (most visibly as "duplicated" lines when you scroll up into the
-        // reflowed scrollback); the DOM renderer doesn't, so this is purely a
-        // render-side artifact. clearTextureAtlas() resets it and triggers a
-        // fresh paint. No-op when WebGL isn't attached (background tab / DOM
-        // fallback).
-        webglRef.current?.clearTextureAtlas();
+        // Rebuild the WebGL renderer with a fresh canvas after a settled
+        // resize. Resizing an existing WebGL canvas leaves blurry text on
+        // fractional-DPR (Windows) displays and can leave stale/ghosted
+        // scrollback rows; clearTextureAtlas() (glyph-only) doesn't fix the
+        // blur. A freshly-attached canvas renders crisp (see remountWebgl), so
+        // we recreate it here. Only when WebGL is currently attached (active
+        // tab) — background tabs use the DOM renderer and must not claim a GPU
+        // context. Debounced via the ResizeObserver settle, so this is once per
+        // resize gesture, not per frame.
+        if (webglRef.current) remountWebgl();
       } catch {
         // Container hidden / detached — fit throws; ignore until shown again.
       }
@@ -505,34 +541,20 @@ export function Terminal({
     const raf = requestAnimationFrame(refit);
     const settle = window.setTimeout(refit, 120);
 
-    let webgl: WebglAddon | null = null;
-    try {
-      webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        try {
-          webgl?.dispose();
-        } catch {}
-        webgl = null;
-        webglRef.current = null;
-      });
-      term.loadAddon(webgl);
-      webglRef.current = webgl;
-    } catch {
-      // WebGL unavailable — xterm.js stays on the DOM renderer.
-      webgl = null;
-      webglRef.current = null;
-    }
+    // Attach the GPU renderer (fresh canvas). The same creation path is reused
+    // by doFit to recreate it after a resize — see remountWebgl.
+    remountWebgl();
     return () => {
       cancelAnimationFrame(raf);
       window.clearTimeout(settle);
       try {
-        webgl?.dispose();
+        webglRef.current?.dispose();
       } catch {
         // term may already be disposed on unmount — ignore.
       }
       webglRef.current = null;
     };
-  }, [active, paneId]);
+  }, [active, paneId, remountWebgl]);
 
   // Re-send the size when the pane finishes connecting. The mount fit cascade
   // runs while the backend PTY doesn't exist yet, so those ResizePty calls are
