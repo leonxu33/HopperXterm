@@ -18,11 +18,13 @@ package transport
 //   - global "keepalive@..."  → replied to, so Shell.Ping succeeds
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -257,6 +259,17 @@ func runExec(ch ssh.Channel, cmd string) {
 		sendExit(ch, 0)
 		return
 	}
+	// scp wire protocol: source mode (-f streams a file out) and sink mode
+	// (-t receives a file). Backs the SCP transport's transfer paths against
+	// real files on the harness host (which is this machine).
+	if strings.HasPrefix(cmd, "scp -f -- ") {
+		scpSource(ch, scpPathArg(cmd))
+		return
+	}
+	if strings.HasPrefix(cmd, "scp -t -- ") {
+		scpSink(ch, scpPathArg(cmd))
+		return
+	}
 	// Owner/Group name resolution (SFTP.ensureIDMaps) — canned getent output.
 	if strings.Contains(cmd, "getent passwd") {
 		_, _ = io.WriteString(ch, "root:x:0:0:root:/root:/bin/bash\ntestuser:x:1000:1000:Test User:/home/testuser:/bin/bash\n")
@@ -307,6 +320,88 @@ func sendExit(ch ssh.Channel, code uint32) {
 	var b [4]byte
 	binary.BigEndian.PutUint32(b[:], code)
 	_, _ = ch.SendRequest("exit-status", false, b[:])
+}
+
+// scpPathArg extracts the file argument from a `scp -f -- '<path>'` /
+// `scp -t -- '<path>'` command, undoing transport.ShQuote.
+func scpPathArg(cmd string) string {
+	i := strings.Index(cmd, " -- ")
+	if i < 0 {
+		return ""
+	}
+	arg := cmd[i+len(" -- "):]
+	if len(arg) >= 2 && arg[0] == '\'' && arg[len(arg)-1] == '\'' {
+		arg = strings.ReplaceAll(arg[1:len(arg)-1], `'\''`, "'")
+	}
+	return arg
+}
+
+// scpSource emulates `scp -f <path>`: wait for the client's readiness byte,
+// send the C-header, stream the file, send the end-of-file status, await the
+// final ack. The caller (runExec) closes the channel.
+func scpSource(ch ssh.Channel, p string) {
+	br := bufio.NewReader(ch)
+	if _, err := br.ReadByte(); err != nil { // client "ready" (0)
+		return
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		_, _ = fmt.Fprintf(ch, "\x01scp: %s: No such file or directory\n", p)
+		return
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		_, _ = fmt.Fprintf(ch, "\x01scp: %s: %v\n", p, err)
+		return
+	}
+	_, _ = fmt.Fprintf(ch, "C0644 %d %s\n", info.Size(), filepath.Base(p))
+	if b, err := br.ReadByte(); err != nil || b != 0 { // client acks the C-header
+		return
+	}
+	_, _ = ch.Write(data)
+	_, _ = ch.Write([]byte{0}) // end-of-file status byte
+	_, _ = br.ReadByte()       // client's final ack
+	sendExit(ch, 0)
+}
+
+// scpSink emulates `scp -t <dest>`: send the readiness ack, read the
+// C-header, read exactly <size> bytes plus the end-of-file marker, write the
+// file, send the commit ack. If dest is an existing directory the file lands
+// under it (named by the header); otherwise dest is the file path itself.
+func scpSink(ch ssh.Channel, dest string) {
+	br := bufio.NewReader(ch)
+	if _, err := ch.Write([]byte{0}); err != nil { // ready
+		return
+	}
+	line, err := br.ReadString('\n')
+	if err != nil {
+		return
+	}
+	_, size, name, perr := parseSCPControl(line)
+	if perr != nil {
+		_, _ = fmt.Fprintf(ch, "\x02%v\n", perr)
+		return
+	}
+	target := dest
+	if fi, serr := os.Stat(dest); serr == nil && fi.IsDir() {
+		target = filepath.Join(dest, name)
+	}
+	if _, err := ch.Write([]byte{0}); err != nil { // ack the C-header
+		return
+	}
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(br, buf); err != nil {
+		return
+	}
+	if b, err := br.ReadByte(); err != nil || b != 0 { // end-of-file marker
+		return
+	}
+	if err := os.WriteFile(target, buf, 0o644); err != nil {
+		_, _ = fmt.Fprintf(ch, "\x02scp: %v\n", err)
+		return
+	}
+	_, _ = ch.Write([]byte{0}) // commit ack
+	sendExit(ch, 0)
 }
 
 // errDenied is the auth-rejection error the harness callbacks return.

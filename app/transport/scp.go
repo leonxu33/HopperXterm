@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"hopperxterm/transport/internal/ftpc"
@@ -219,90 +220,260 @@ func entryFromFtpc(e *ftpc.Entry) Entry {
 }
 
 // --- transfers (SCP wire protocol) ------------------------------------------
+//
+// The single-file transfer paths are expressed as two streaming primitives
+// — openSource (scp -f, a ReadCloser) and openSink (scp -t, a WriteCloser)
+// — so the same protocol code serves both local↔remote transfers (Download/
+// Upload below) and direct remote↔remote streaming (transport.CopyRemoteFile,
+// via the RemoteReadable / RemoteWritable capabilities). The earlier
+// monolithic Download/Upload couldn't stream server-to-server because the
+// data never surfaced as an io.Reader/Writer.
 
-// Download copies remotePath to localPath using scp source mode (`scp -f`).
-// Protocol: we send a 0 byte, the remote sends a `C<mode> <size> <name>`
-// control line, we ack, the remote streams <size> bytes then a status byte,
-// we ack. progress reports cumulative bytes for the file; cancel closes the
-// session to abort an in-flight copy.
-func (s *SCP) Download(remotePath, localPath string, progress ProgressFunc, cancel <-chan struct{}) (int64, error) {
+// scpReader is the read side of `scp -f`: it yields exactly the file's bytes
+// (Read returns io.EOF once `remaining` hits 0) and finishes the protocol on
+// Close — consume the source's end-of-file status byte, send the final ack,
+// reap the session. Close is idempotent; abort tears the session down for
+// cancellation without attempting the (now-impossible) closing handshake.
+type scpReader struct {
+	sess      *ssh.Session
+	stdin     io.WriteCloser
+	r         *bufio.Reader
+	remaining int64
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (sr *scpReader) Read(b []byte) (int, error) {
+	if sr.remaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(b)) > sr.remaining {
+		b = b[:sr.remaining]
+	}
+	n, err := sr.r.Read(b)
+	sr.remaining -= int64(n)
+	return n, err
+}
+
+func (sr *scpReader) Close() error {
+	sr.closeOnce.Do(func() {
+		// Only run the closing handshake when the whole file was read; a
+		// short read means the copy was aborted, so just reap the session.
+		if sr.remaining == 0 {
+			if _, err := sr.r.ReadByte(); err != nil { // end-of-file status byte
+				sr.closeErr = err
+			} else if _, err := sr.stdin.Write([]byte{0}); err != nil { // final ack
+				sr.closeErr = err
+			}
+		}
+		_ = sr.stdin.Close()
+		if werr := sr.sess.Wait(); werr != nil && sr.closeErr == nil && sr.remaining == 0 {
+			sr.closeErr = werr
+		}
+		_ = sr.sess.Close()
+	})
+	return sr.closeErr
+}
+
+func (sr *scpReader) abort() error { return sr.sess.Close() }
+
+// openSource starts `scp -f`, walks the control stream to the file's
+// `C<mode> <size> <name>` header, acks it, and returns a reader positioned
+// at the first data byte. Directory ('D'/'E') and error (0x01/0x02) headers
+// are surfaced as errors — Download is only ever pointed at a regular file.
+// startTransfer opens a session, wires stdin/stdout, and starts cmd, tearing
+// the session down on any error so the caller only ever cleans up a session
+// it has taken ownership of. Shared by the source (scp -f) and sink (scp -t)
+// openers, which otherwise duplicate this exact setup.
+func (s *SCP) startTransfer(cmd string) (*ssh.Session, io.WriteCloser, io.Reader, error) {
 	sess, err := s.client.NewSession()
 	if err != nil {
-		return 0, err
+		return nil, nil, nil, err
 	}
-	defer sess.Close()
 	stdin, err := sess.StdinPipe()
 	if err != nil {
-		return 0, err
+		sess.Close()
+		return nil, nil, nil, err
 	}
 	stdout, err := sess.StdoutPipe()
 	if err != nil {
-		return 0, err
+		sess.Close()
+		return nil, nil, nil, err
 	}
-	if err := sess.Start("scp -f -- " + ShQuote(remotePath)); err != nil {
-		return 0, err
+	if err := sess.Start(cmd); err != nil {
+		sess.Close()
+		return nil, nil, nil, err
 	}
-	stop := watchCancel(cancel, sess)
-	defer stop()
+	return sess, stdin, stdout, nil
+}
 
+func (s *SCP) openSource(remotePath string) (*scpReader, error) {
+	sess, stdin, stdout, err := s.startTransfer("scp -f -- " + ShQuote(remotePath))
+	if err != nil {
+		return nil, err
+	}
 	// Sized to match SFTP's transfer buffer so the data stream is read in
 	// large chunks rather than the default ~4 KiB.
 	r := bufio.NewReaderSize(stdout, 256*1024)
 	if _, err := stdin.Write([]byte{0}); err != nil { // tell source we're ready
-		return 0, err
+		sess.Close()
+		return nil, err
 	}
-	var written int64
 	for {
 		// ReadString returns a non-empty line (with the trailing '\n') on
 		// success and an error otherwise, so line[0] is always safe below.
 		line, err := r.ReadString('\n')
 		if err != nil {
-			return written, err
+			sess.Close()
+			return nil, err
 		}
 		switch line[0] {
 		case 'C':
 			_, size, _, perr := parseSCPControl(line)
 			if perr != nil {
-				return written, perr
+				sess.Close()
+				return nil, perr
 			}
 			if _, err := stdin.Write([]byte{0}); err != nil { // ack the C message
-				return written, err
+				sess.Close()
+				return nil, err
 			}
-			dst, err := os.Create(localPath)
-			if err != nil {
-				return written, fmt.Errorf("create local %s: %w", localPath, err)
-			}
-			var w io.Writer = dst
-			if progress != nil {
-				w = &progressWriterWrap{w: dst, progress: progress}
-			}
-			n, cerr := io.CopyN(w, r, size)
-			written += n
-			dst.Close()
-			if cerr != nil {
-				return written, cerr
-			}
-			if _, err := r.ReadByte(); err != nil { // source's end-of-file status byte
-				return written, err
-			}
-			if _, err := stdin.Write([]byte{0}); err != nil { // final ack
-				return written, err
-			}
-			_ = stdin.Close()
-			_ = sess.Wait()
-			return written, nil
+			return &scpReader{sess: sess, stdin: stdin, r: r, remaining: size}, nil
 		case 'T': // mtime/atime line — ack and keep going
 			if _, err := stdin.Write([]byte{0}); err != nil {
-				return written, err
+				sess.Close()
+				return nil, err
 			}
 		case 0x01, 0x02: // warning / error from the source
-			return written, fmt.Errorf("scp: %s", strings.TrimSpace(line[1:]))
+			sess.Close()
+			return nil, fmt.Errorf("scp: %s", strings.TrimSpace(line[1:]))
 		case 'D', 'E':
-			return written, errors.New("scp: source is a directory (use DownloadDir)")
+			sess.Close()
+			return nil, errors.New("scp: source is a directory (use DownloadDir)")
 		default:
-			return written, fmt.Errorf("scp: unexpected protocol byte %q", line[0])
+			sess.Close()
+			return nil, fmt.Errorf("scp: unexpected protocol byte %q", line[0])
 		}
 	}
+}
+
+// OpenRemote opens remotePath for streaming reads (RemoteReadable).
+func (s *SCP) OpenRemote(remotePath string) (io.ReadCloser, error) {
+	return s.openSource(remotePath)
+}
+
+// scpWriter is the write side of `scp -t`: bytes written go straight to the
+// sink, and Close finishes the protocol — send the end-of-file marker, read
+// the sink's commit ack, reap the session. Close is idempotent; abort tears
+// the session down for cancellation.
+//
+// scp frames the file by the size announced in the C-header, so the writer
+// must deliver *exactly* that many bytes. `remaining` enforces it against a
+// source whose length drifts from the stat'd size (a file changing mid-copy):
+// Write refuses anything past the announced size (surfaced to io.Copy as a
+// short write) and Close fails if the source ended early, rather than letting
+// scp mis-frame and silently corrupt the destination.
+type scpWriter struct {
+	sess      *ssh.Session
+	stdin     io.WriteCloser
+	r         *bufio.Reader
+	remaining int64
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (sw *scpWriter) Write(b []byte) (int, error) {
+	short := int64(len(b)) > sw.remaining
+	if short {
+		b = b[:sw.remaining]
+	}
+	n, err := sw.stdin.Write(b)
+	sw.remaining -= int64(n)
+	if err == nil && short {
+		err = io.ErrShortWrite // source exceeded the announced size
+	}
+	return n, err
+}
+
+func (sw *scpWriter) Close() error {
+	sw.closeOnce.Do(func() {
+		if sw.remaining > 0 {
+			// Source ended early; the sink is still waiting for bytes. Sending
+			// the EOF marker now would have scp read it as file data, so abort
+			// instead of completing a frame we know is short.
+			sw.closeErr = io.ErrUnexpectedEOF
+			_ = sw.sess.Close()
+			return
+		}
+		if _, err := sw.stdin.Write([]byte{0}); err != nil { // end-of-file marker
+			sw.closeErr = err
+		} else if err := readAck(sw.r); err != nil { // sink's commit ack
+			sw.closeErr = err
+		}
+		_ = sw.stdin.Close()
+		if werr := sw.sess.Wait(); werr != nil && sw.closeErr == nil {
+			sw.closeErr = werr
+		}
+		_ = sw.sess.Close()
+	})
+	return sw.closeErr
+}
+
+func (sw *scpWriter) abort() error { return sw.sess.Close() }
+
+// openSink starts `scp -t`, performs the opening handshake (read ready ack,
+// send the `C0644 <size> <name>` header, read its ack), and returns a writer
+// ready for the file's bytes. The C-message name is the basename; scp writes
+// to remotePath itself when it isn't an existing directory.
+func (s *SCP) openSink(remotePath string, size int64) (*scpWriter, error) {
+	sess, stdin, stdout, err := s.startTransfer("scp -t -- " + ShQuote(remotePath))
+	if err != nil {
+		return nil, err
+	}
+	r := bufio.NewReader(stdout)
+	if err := readAck(r); err != nil {
+		sess.Close()
+		return nil, err
+	}
+	if _, err := fmt.Fprintf(stdin, "C0644 %d %s\n", size, path.Base(remotePath)); err != nil {
+		sess.Close()
+		return nil, err
+	}
+	if err := readAck(r); err != nil {
+		sess.Close()
+		return nil, err
+	}
+	return &scpWriter{sess: sess, stdin: stdin, r: r, remaining: size}, nil
+}
+
+// CreateRemote opens remotePath for streaming writes (RemoteWritable). size
+// is mandatory — scp sink mode frames the file by the count in its header.
+func (s *SCP) CreateRemote(remotePath string, size int64) (io.WriteCloser, error) {
+	return s.openSink(remotePath, size)
+}
+
+// Download copies remotePath to localPath using scp source mode (`scp -f`).
+// progress reports cumulative bytes for the file; cancel aborts an in-flight
+// copy by killing the session.
+func (s *SCP) Download(remotePath, localPath string, progress ProgressFunc, cancel <-chan struct{}) (int64, error) {
+	src, err := s.openSource(remotePath)
+	if err != nil {
+		return 0, err
+	}
+	dst, err := os.Create(localPath)
+	if err != nil {
+		_ = src.abort()
+		return 0, fmt.Errorf("create local %s: %w", localPath, err)
+	}
+	stop := watchCancel(cancel, closerFunc(src.abort), dst)
+	defer stop()
+	n, cerr := sftpDownloadCopy(dst, src, progress)
+	_ = dst.Close()
+	if cerr != nil {
+		_ = src.abort() // copy failed (watchCancel only fires on external cancel)
+		return n, cerr
+	}
+	return n, src.Close() // finalize the protocol (deferred stop is then a no-op)
 }
 
 // Upload copies localPath onto remotePath using scp sink mode (`scp -t`).
@@ -316,56 +487,18 @@ func (s *SCP) Upload(localPath, remotePath string, progress ProgressFunc, cancel
 	if err != nil {
 		return 0, err
 	}
-	size := info.Size()
-
-	sess, err := s.client.NewSession()
+	sink, err := s.openSink(remotePath, info.Size())
 	if err != nil {
 		return 0, err
 	}
-	defer sess.Close()
-	stdin, err := sess.StdinPipe()
-	if err != nil {
-		return 0, err
-	}
-	stdout, err := sess.StdoutPipe()
-	if err != nil {
-		return 0, err
-	}
-	if err := sess.Start("scp -t -- " + ShQuote(remotePath)); err != nil {
-		return 0, err
-	}
-	stop := watchCancel(cancel, sess)
+	stop := watchCancel(cancel, f, closerFunc(sink.abort))
 	defer stop()
-
-	r := bufio.NewReader(stdout)
-	if err := readAck(r); err != nil {
-		return 0, err
-	}
-	// The C-message name is the basename; scp writes to remotePath itself
-	// when it isn't an existing directory.
-	if _, err := fmt.Fprintf(stdin, "C0644 %d %s\n", size, path.Base(remotePath)); err != nil {
-		return 0, err
-	}
-	if err := readAck(r); err != nil {
-		return 0, err
-	}
-	var src io.Reader = f
-	if progress != nil {
-		src = &progressReaderWrap{r: f, progress: progress}
-	}
-	n, cerr := io.CopyN(stdin, src, size)
+	n, cerr := sftpUploadCopy(sink, f, progress)
 	if cerr != nil {
+		_ = sink.abort() // copy failed (watchCancel only fires on external cancel)
 		return n, cerr
 	}
-	if _, err := stdin.Write([]byte{0}); err != nil { // end-of-file marker
-		return n, err
-	}
-	if err := readAck(r); err != nil {
-		return n, err
-	}
-	_ = stdin.Close()
-	_ = sess.Wait()
-	return n, nil
+	return n, sink.Close()
 }
 
 // UploadDir recursively copies a local tree to remoteDir, mirroring

@@ -107,7 +107,10 @@ func (w *memWriter) Close() error {
 	w.m.files[w.path] = append([]byte(nil), w.buf.Bytes()...)
 	return nil
 }
-func (m *memFS) CreateRemote(p string) (io.WriteCloser, error) {
+
+// CreateRemote ignores size: the buffer grows to whatever is written, so the
+// in-memory client never needs the up-front length scp sink mode requires.
+func (m *memFS) CreateRemote(p string, _ int64) (io.WriteCloser, error) {
 	return &memWriter{m: m, path: p}, nil
 }
 

@@ -345,7 +345,7 @@ func copyEntry(
 			}
 			return progress(base + written)
 		}
-		return transport.CopyRemoteFile(src, srcPath, dst, dstPath, fileProgress, cancel)
+		return transport.CopyRemoteFile(src, srcPath, dst, dstPath, st.Size, fileProgress, cancel)
 	}
 
 	// Directory: create it on the destination, then recurse. The remote

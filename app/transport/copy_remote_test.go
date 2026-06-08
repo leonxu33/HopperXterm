@@ -41,6 +41,7 @@ func TestCopyRemoteFile_StreamsBetweenTwoSFTP(t *testing.T) {
 	n, err := CopyRemoteFile(
 		src, remotePath(srcDir)+"/f.bin",
 		dst, remotePath(dstDir)+"/copy.bin",
+		int64(len(payload)),
 		func(w int64) error { lastProgress = w; return nil }, nil,
 	)
 	if err != nil {
@@ -85,6 +86,7 @@ func TestCopyRemoteFile_TempFileFallback(t *testing.T) {
 	n, err := CopyRemoteFile(
 		noStreamClient{src}, remotePath(srcDir)+"/a.bin",
 		noStreamClient{dst}, remotePath(dstDir)+"/a.bin",
+		int64(size),
 		func(w int64) error { reports = append(reports, w); return nil }, nil,
 	)
 	if err != nil {

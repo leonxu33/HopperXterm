@@ -53,27 +53,55 @@ type FileClient interface {
 // temp file) during a cross-pane copy. CopyRemoteFile streams when the
 // source satisfies RemoteReadable and the destination satisfies
 // RemoteWritable; otherwise it falls back to download-to-temp → upload.
-// Only *SFTP implements these today — FTP/S3/SCP/local take the fallback.
+// Both *SFTP and *SCP implement these, so any SSH↔SSH pairing streams;
+// FTP/S3/local take the fallback. CreateRemote takes the source size up
+// front because scp sink mode (scp -t) must announce it in its control
+// header before any bytes flow — SFTP ignores the argument.
 type RemoteReadable interface {
 	OpenRemote(p string) (io.ReadCloser, error)
 }
 type RemoteWritable interface {
-	CreateRemote(p string) (io.WriteCloser, error)
+	CreateRemote(p string, size int64) (io.WriteCloser, error)
 }
+
+// aborter is an OPTIONAL capability on a streaming reader/writer: abort
+// forcibly tears the transfer down (kills the session) for cancellation,
+// as distinct from Close which finalizes a *completed* transfer's protocol
+// handshake. A streamer that doesn't implement it (e.g. *sftp.File, where
+// closing the handle already fails any queued requests) is aborted by
+// Close itself. See abortCloser.
+type aborter interface{ abort() error }
+
+// abortCloser returns the io.Closer watchCancel should fire on cancel:
+// the streamer's hard abort if it has one, else its Close.
+func abortCloser(c io.Closer) io.Closer {
+	if a, ok := c.(aborter); ok {
+		return closerFunc(a.abort)
+	}
+	return c
+}
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
 
 // OpenRemote opens a remote file for reading (RemoteReadable).
 func (s *SFTP) OpenRemote(p string) (io.ReadCloser, error) { return s.c.Open(p) }
 
 // CreateRemote creates/truncates a remote file for writing (RemoteWritable).
-func (s *SFTP) CreateRemote(p string) (io.WriteCloser, error) { return s.c.Create(p) }
+// SFTP streams without knowing the size in advance, so size is ignored.
+func (s *SFTP) CreateRemote(p string, _ int64) (io.WriteCloser, error) { return s.c.Create(p) }
 
-// CopyRemoteFile copies a single file from src:srcPath to dst:dstPath.
-// When both ends support streaming (RemoteReadable / RemoteWritable) the
-// bytes flow directly through this process — one pass, no disk. Otherwise
-// it falls back to a local temp file (download then upload), which works
-// for any FileClient pair (e.g. SFTP↔S3). progress reports cumulative
-// bytes for this one file; cancel aborts mid-flight. Returns bytes copied.
-func CopyRemoteFile(src FileClient, srcPath string, dst FileClient, dstPath string, progress ProgressFunc, cancel <-chan struct{}) (int64, error) {
+// CopyRemoteFile copies a single file (of the given size) from src:srcPath
+// to dst:dstPath. When both ends support streaming (RemoteReadable /
+// RemoteWritable) the bytes flow directly through this process — one pass,
+// no disk. Otherwise it falls back to a local temp file (download then
+// upload), which works for any FileClient pair (e.g. SFTP↔S3). size is the
+// source file's byte length (the caller already stat'd it); it's required
+// by scp sink mode and ignored by every other writer. progress reports
+// cumulative bytes for this one file; cancel aborts mid-flight. Returns
+// bytes copied.
+func CopyRemoteFile(src FileClient, srcPath string, dst FileClient, dstPath string, size int64, progress ProgressFunc, cancel <-chan struct{}) (int64, error) {
 	rd, rok := src.(RemoteReadable)
 	wr, wok := dst.(RemoteWritable)
 	if rok && wok {
@@ -82,11 +110,11 @@ func CopyRemoteFile(src FileClient, srcPath string, dst FileClient, dstPath stri
 			return 0, fmt.Errorf("open remote %s: %w", srcPath, err)
 		}
 		defer rc.Close()
-		wc, err := wr.CreateRemote(dstPath)
+		wc, err := wr.CreateRemote(dstPath, size)
 		if err != nil {
 			return 0, fmt.Errorf("create remote %s: %w", dstPath, err)
 		}
-		stopWatch := watchCancel(cancel, rc, wc)
+		stopWatch := watchCancel(cancel, abortCloser(rc), abortCloser(wc))
 		defer stopWatch()
 
 		// Bridge the source→here and here→dest hops with an in-memory pipe
