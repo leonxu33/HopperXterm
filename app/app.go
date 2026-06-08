@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"hopperxterm/credentials"
+	"hopperxterm/events"
 	"hopperxterm/macro"
 	"hopperxterm/pane"
 	"hopperxterm/prefs"
@@ -487,6 +488,32 @@ func (a *App) StartResourceMonitor(paneID string) error {
 // StopResourceMonitor stops the /proc poller for the pane.
 func (a *App) StopResourceMonitor(paneID string) error {
 	return a.panes.StopResourceMonitor(paneID)
+}
+
+// ListProcesses returns the pane remote's process list for the picker.
+func (a *App) ListProcesses(paneID string) ([]events.ProcessInfo, error) {
+	return a.panes.ListProcesses(paneID)
+}
+
+// StartProcessMonitor begins streaming process:sample events for one PID.
+func (a *App) StartProcessMonitor(paneID string, pid int) error {
+	return a.panes.StartProcessMonitor(paneID, pid)
+}
+
+// StopProcessMonitor stops the per-process stream for one PID.
+func (a *App) StopProcessMonitor(paneID string, pid int) error {
+	return a.panes.StopProcessMonitor(paneID, pid)
+}
+
+// StartProcessMonitorByCommand follows a process by name (survives restarts
+// under a new PID; first match wins).
+func (a *App) StartProcessMonitorByCommand(paneID, command string) error {
+	return a.panes.StartProcessMonitorByCommand(paneID, command)
+}
+
+// StopProcessMonitorByCommand stops a name-following process stream.
+func (a *App) StopProcessMonitorByCommand(paneID, command string) error {
+	return a.panes.StopProcessMonitorByCommand(paneID, command)
 }
 
 // SaveCurrentPassword persists the typed-during-auth password for the

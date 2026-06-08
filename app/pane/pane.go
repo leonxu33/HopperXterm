@@ -78,6 +78,13 @@ type Pane struct {
 	resOn     bool
 	resRefs   int
 
+	// Per-process monitors, keyed by spec ("pid:<n>" | "cmd:<name>"). Each
+	// entry owns one SSH exec channel streaming that target's CPU/memory at
+	// 1 Hz. Refcounted like the host poller so two panels watching the same
+	// target share a stream and the last Stop tears it down. SSH-only.
+	procMu  sync.Mutex
+	procMon map[string]*procMonitor
+
 	// osFamily caches the remote OS family ("linux"/"darwin"/"windows")
 	// from the connect-time probe so StartResourceMonitor doesn't pay a
 	// second `uname -s` round trip before launching the poller. Empty
@@ -1106,6 +1113,7 @@ func (p *Pane) Resize(cols, rows int) error {
 func (p *Pane) Close() {
 	p.cancel()
 	p.stopResourceMonitor()
+	p.stopAllProcessMonitors()
 	p.fileMu.Lock()
 	if p.file != nil {
 		_ = p.file.Close()

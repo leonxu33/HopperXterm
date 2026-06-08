@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hostKeyFor, getResourceBuffer, resetResourceBuffer } from './ResourcePanel';
+import { hostKeyFor, getResourceBuffer, resetResourceBuffer, specOf } from './ResourcePanel';
 
 describe('hostKeyFor', () => {
   it('returns null for nullish sessions', () => {
@@ -32,6 +32,16 @@ describe('hostKeyFor', () => {
   it('returns null for protocols that have no resource monitor', () => {
     expect(hostKeyFor({ type: 'ftp', host: 'h' })).toBeNull();
     expect(hostKeyFor({ type: 'aws' })).toBeNull();
+  });
+});
+
+describe('specOf', () => {
+  it('builds a pid spec for a PID target', () => {
+    expect(specOf({ kind: 'pid', pid: 4321, name: 'chrome' })).toBe('pid:4321');
+  });
+
+  it('builds a cmd spec for a command target', () => {
+    expect(specOf({ kind: 'command', command: 'test-binary' })).toBe('cmd:test-binary');
   });
 });
 

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"hopperxterm/events"
 	"hopperxterm/profile"
 	"hopperxterm/transport"
 )
@@ -305,6 +306,53 @@ func (m *Manager) StopResourceMonitor(paneID string) error {
 		return errors.New("pane: not found")
 	}
 	p.StopResourceMonitor()
+	return nil
+}
+
+// ListProcesses returns the remote process list for the pane's picker.
+func (m *Manager) ListProcesses(paneID string) ([]events.ProcessInfo, error) {
+	p, ok := m.get(paneID)
+	if !ok {
+		return nil, errors.New("pane: not found")
+	}
+	return p.ListProcesses()
+}
+
+// StartProcessMonitor begins streaming process:sample events for one PID.
+func (m *Manager) StartProcessMonitor(paneID string, pid int) error {
+	p, ok := m.get(paneID)
+	if !ok {
+		return errors.New("pane: not found")
+	}
+	return p.StartProcessMonitor(pid)
+}
+
+// StopProcessMonitor stops the per-process stream for one PID.
+func (m *Manager) StopProcessMonitor(paneID string, pid int) error {
+	p, ok := m.get(paneID)
+	if !ok {
+		return errors.New("pane: not found")
+	}
+	p.StopProcessMonitor(pid)
+	return nil
+}
+
+// StartProcessMonitorByCommand begins a name-following process stream.
+func (m *Manager) StartProcessMonitorByCommand(paneID, command string) error {
+	p, ok := m.get(paneID)
+	if !ok {
+		return errors.New("pane: not found")
+	}
+	return p.StartProcessMonitorByCommand(command)
+}
+
+// StopProcessMonitorByCommand stops a name-following process stream.
+func (m *Manager) StopProcessMonitorByCommand(paneID, command string) error {
+	p, ok := m.get(paneID)
+	if !ok {
+		return errors.New("pane: not found")
+	}
+	p.StopProcessMonitorByCommand(command)
 	return nil
 }
 

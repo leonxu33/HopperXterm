@@ -134,6 +134,49 @@ func EmitResourceSample(ctx context.Context, paneID string, s ResourceSample) {
 	safeEmit(ctx, "resource:sample:"+paneID, s)
 }
 
+// ProcessSample is one tick of a single monitored process's CPU/memory.
+// CPUPct is top-style — the share of one logical core, so it can exceed
+// 100 for a multi-threaded process spanning several cores.
+//
+// Spec identifies which monitor produced the sample ("pid:<n>" or
+// "cmd:<name>"); several monitors on one pane share the
+// "process:sample:{paneId}" event, so the frontend demuxes on Spec. This
+// also lets command-mode monitors keep a stable identity while the resolved
+// PID changes across restarts.
+//
+// Alive semantics depend on the monitor kind: for a PID monitor it drops to
+// false on the single final tick after the PID exits (terminal — the stream
+// then ends). For a command monitor it reflects whether a matching process
+// is running *right now* (false while none matches), and the stream keeps
+// polling so it resumes when the command restarts under a new PID.
+type ProcessSample struct {
+	TS     int64   `json:"ts"`
+	PID    int     `json:"pid"`
+	CPUPct float64 `json:"cpuPct"` // top-style; may exceed 100 across cores
+	MemKB  int64   `json:"memKB"`  // resident set size (RSS)
+	Alive  bool    `json:"alive"`
+	Spec   string  `json:"spec"` // "pid:<n>" | "cmd:<name>"
+}
+
+// EmitProcessSample emits one per-process tick for the given pane. All
+// monitored PIDs on a pane share the "process:sample:{paneId}" event; the
+// frontend filters by ProcessSample.PID.
+func EmitProcessSample(ctx context.Context, paneID string, s ProcessSample) {
+	safeEmit(ctx, "process:sample:"+paneID, s)
+}
+
+// ProcessInfo is one row of the process picker list. CPUPct is a
+// best-effort instantaneous percentage on Linux/macOS (from `ps pcpu`)
+// and 0 on Windows, where the list is ordered by total CPU time instead.
+// MemKB is the resident set size.
+type ProcessInfo struct {
+	PID    int     `json:"pid"`
+	Name   string  `json:"name"`
+	User   string  `json:"user"`
+	CPUPct float64 `json:"cpuPct"`
+	MemKB  int64   `json:"memKB"`
+}
+
 // HostInfo is a snapshot of the remote (or local) host's OS identity.
 // All fields are optional — the frontend renders whichever ones land.
 type HostInfo struct {

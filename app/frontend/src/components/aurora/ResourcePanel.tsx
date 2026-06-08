@@ -11,10 +11,17 @@ import {
   SaveTextFile,
   StartResourceMonitor,
   StopResourceMonitor,
+  StartProcessMonitor,
+  StopProcessMonitor,
+  StartProcessMonitorByCommand,
+  StopProcessMonitorByCommand,
 } from '../../../wailsjs/go/main/App';
 import { EventsOn } from '../../../wailsjs/runtime/runtime';
 import { ContextMenu } from './primitives';
 import type { ContextMenuItem } from './primitives';
+import { formatKB } from '../../lib/format';
+import { ProcessPicker } from '../modals/ProcessPicker';
+import type { ProcTarget } from '../modals/ProcessPicker';
 
 export type ResourceSample = {
   ts: number;
@@ -303,6 +310,94 @@ export function useResourceMonitor(hostKey: string | null, capacity = 1800) {
 
 const EMPTY_SAMPLES: ResourceSample[] = [];
 
+// ─── Per-process monitoring ────────────────────────────────────────────────
+// A single selected process per panel. Unlike the host poller (whose
+// lifetime is owned by syncResourceHosts and the open-tab set), the process
+// stream is panel- and selection-scoped: it starts when a PID is chosen and
+// stops when the selection clears or the panel unmounts. The backend
+// reference-counts per (pane, pid), so two panels watching the same PID
+// share one exec channel and one event.
+
+export type ProcessSample = {
+  ts: number;
+  pid: number;
+  cpuPct: number; // top-style; may exceed 100 across cores
+  memKB: number;
+  alive: boolean;
+  spec: string; // "pid:<n>" | "cmd:<name>" — demuxes shared pane event
+};
+
+export function specOf(t: ProcTarget): string {
+  return t.kind === 'pid' ? `pid:${t.pid}` : `cmd:${t.command}`;
+}
+
+const MAX_PROC_BUFFER = 1800; // 30 min @ 1 Hz, matches the host buffer.
+
+// useProcessMonitor drives one target's stream for the given pane. Passing a
+// null target tears everything down. Samples are demuxed on `spec` (so a
+// command target keeps a stable identity while its resolved PID changes).
+//
+// `alive`'s meaning is kind-dependent: for a PID target it goes false once
+// (terminal — the process exited and the stream ends). For a command target
+// it tracks whether a match is running *right now*; the stream keeps polling
+// and resumes when the command restarts, so we keep charting zeros during
+// downtime rather than stopping.
+function useProcessMonitor(paneId: string | null, target: ProcTarget | null) {
+  const [samples, setSamples] = useState<ProcessSample[]>([]);
+  const [alive, setAlive] = useState(true);
+  const lastAtRef = useRef(0);
+  const spec = target ? specOf(target) : null;
+  const isCommand = target?.kind === 'command';
+
+  useEffect(() => {
+    // Reset for the new selection (or for the no-selection teardown).
+    setSamples([]);
+    setAlive(true);
+    lastAtRef.current = 0;
+    if (!paneId || !target || !spec) return;
+    const start = () =>
+      target.kind === 'pid'
+        ? StartProcessMonitor(paneId, target.pid)
+        : StartProcessMonitorByCommand(paneId, target.command);
+    const stop = () =>
+      target.kind === 'pid'
+        ? StopProcessMonitor(paneId, target.pid)
+        : StopProcessMonitorByCommand(paneId, target.command);
+    void start().catch(() => {});
+    const off = EventsOn(`process:sample:${paneId}`, (s: ProcessSample) => {
+      if (s.spec !== spec) return; // several monitors share the pane's event
+      lastAtRef.current = Date.now();
+      setAlive(s.alive);
+      // PID mode: don't buffer the terminal exit tick (it's a sentinel).
+      // Command mode: buffer everything, including not-running zeros, so the
+      // timeline shows downtime as a gap rather than freezing.
+      if (!isCommand && !s.alive) return;
+      setSamples((prev) => {
+        // Keep the last MAX_PROC_BUFFER-1, then append → caps at MAX_PROC_BUFFER.
+        const next = prev.slice(Math.max(0, prev.length - MAX_PROC_BUFFER + 1));
+        next.push(s);
+        return next;
+      });
+    });
+    return () => {
+      off();
+      void stop().catch(() => {});
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paneId, spec]);
+
+  const latest = samples.length > 0 ? samples[samples.length - 1] : null;
+  // Same local-arrival heuristic as the host hook — robust to remote clock
+  // skew. The host poller's 1 Hz re-renders keep this recomputing even when
+  // the process stream itself stalls (so a stall flips `running` to false).
+  // In command mode the stream emits every second regardless, so `running`
+  // stays true while connected even when no process currently matches.
+  const streamAlive = lastAtRef.current > 0 ? Date.now() - lastAtRef.current < 5000 : false;
+  const running = isCommand ? streamAlive : alive && streamAlive;
+  const reset = () => setSamples([]);
+  return { samples, latest, running, alive, reset };
+}
+
 type Props = {
   paneId: string | null;
   paneState: 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected' | null;
@@ -321,7 +416,51 @@ const COLOR_UP = 'oklch(0.78 0.14 70)';
 export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
   const { samples, latest, running } = useResourceMonitor(hostKey, 1800);
   const [win, setWin] = useState<Win>('1m');
+  const [showSystem, setShowSystem] = useState(true);
   const points = WIN_POINTS[win];
+
+  // Per-process selection (one at a time per panel) — a fixed PID or a
+  // command name that follows the process across restarts.
+  const [proc, setProc] = useState<ProcTarget | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  // Drop the selection when the pane leaves Connected: the PID belonged to
+  // that connection and would be stale (or a different process) on reconnect.
+  useEffect(() => {
+    if (paneState && paneState !== 'Connected') {
+      setProc(null);
+      setPickerOpen(false);
+    }
+  }, [paneState]);
+  const {
+    samples: procSamples,
+    latest: procLatest,
+    running: procRunning,
+    alive: procAlive,
+    reset: resetProc,
+  } = useProcessMonitor(paneId, proc);
+  // Display label + a stable key for the export filename.
+  const procLabel = proc ? (proc.kind === 'pid' ? proc.name : proc.command) : '';
+  const procView = useMemo(() => procSamples.slice(-points), [procSamples, points]);
+  const procSeries = useMemo(() => {
+    const cpu: number[] = [];
+    const mem: number[] = [];
+    for (const s of procView) {
+      cpu.push(s.cpuPct);
+      mem.push(s.memKB);
+    }
+    return { cpu, mem };
+  }, [procView]);
+  // Chart Y-axis maxima, derived in one pass. CPU is top-style (can exceed
+  // 100% across cores): keep a 100% baseline but grow to fit a multi-core
+  // peak. Memory autoscales to its peak.
+  const { procCpuMax, procMemMax } = useMemo(() => {
+    let cpuPeak = 100;
+    let memPeak = 1;
+    for (const v of procSeries.cpu) if (v > cpuPeak) cpuPeak = v;
+    for (const v of procSeries.mem) if (v > memPeak) memPeak = v;
+    return { procCpuMax: Math.ceil((cpuPeak * 1.1) / 50) * 50, procMemMax: memPeak * 1.15 };
+  }, [procSeries]);
+
   const view = useMemo(() => samples.slice(-points), [samples, points]);
   // Derive all four charts' series arrays in a single pass over `view`,
   // memoized so the (up to 1800-element) arrays are rebuilt only when the
@@ -344,16 +483,43 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
     return { cpu, mem, diskRd, diskWr, netRx, netTx };
   }, [view]);
 
-  // Right-click menu: Reset / Export to CSV. Stays out of the early
-  // return below so the menu is available even when no samples have
-  // arrived yet (the menu items themselves are disabled in that case).
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
-  const onPanelContext = (e: React.MouseEvent) => {
+  // Two scoped right-click menus: the system menu (Reset / Export the host
+  // buffer) fires in the system-monitor area; the process menu fires in the
+  // process area. Each stays out of the early return below so it's available
+  // even before samples arrive (items disable themselves when empty).
+  const [sysMenu, setSysMenu] = useState<{ x: number; y: number } | null>(null);
+  const [procMenu, setProcMenu] = useState<{ x: number; y: number } | null>(null);
+  const onSystemContext = (e: React.MouseEvent) => {
     e.preventDefault();
-    setCtxMenu({ x: e.clientX, y: e.clientY });
+    e.stopPropagation();
+    setSysMenu({ x: e.clientX, y: e.clientY });
+  };
+  const onProcessContext = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setProcMenu({ x: e.clientX, y: e.clientY });
   };
   const onResetBuffer = () => {
     resetResourceBuffer(hostKey);
+  };
+  const onExportProcCsv = async () => {
+    if (!proc || procSamples.length === 0) return;
+    const header = ['unix_ts_seconds', 'iso_time', 'pid', 'cpu_pct', 'mem_kb'].join(',');
+    const lines: string[] = [header];
+    for (const s of procSamples) {
+      lines.push(
+        [Math.floor(s.ts / 1000), new Date(s.ts).toISOString(), s.pid, s.cpuPct.toFixed(2), s.memKB].join(','),
+      );
+    }
+    const csv = lines.join('\n') + '\n';
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const namePart = procLabel.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+    const suggested = `process-${namePart}-${stamp}.csv`;
+    try {
+      await SaveTextFile(suggested, csv);
+    } catch (e) {
+      console.error('SaveTextFile failed:', e);
+    }
   };
   const onExportCsv = async () => {
     const data = getResourceBuffer(hostKey);
@@ -416,7 +582,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
   const connected = !noSession && !notConnected;
 
   const sampleCount = samples.length;
-  const ctxItems: ContextMenuItem[] = [
+  const sysItems: ContextMenuItem[] = [
     {
       kind: 'item',
       label: 'Reset',
@@ -431,15 +597,29 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
     },
   ];
 
+  const procSampleCount = procSamples.length;
+  const procItems: ContextMenuItem[] = proc
+    ? [
+        { kind: 'item', label: 'Change process…', onClick: () => setPickerOpen(true) },
+        { kind: 'item', label: 'Stop monitoring', onClick: () => setProc(null) },
+        { kind: 'separator' },
+        { kind: 'item', label: 'Reset', onClick: () => resetProc(), disabled: procSampleCount === 0 },
+        {
+          kind: 'item',
+          label: `Export to CSV${procSampleCount > 0 ? ` (${procSampleCount})` : ''}`,
+          onClick: () => void onExportProcCsv(),
+          disabled: procSampleCount === 0,
+        },
+      ]
+    : [{ kind: 'item', label: 'Monitor a process…', onClick: () => setPickerOpen(true) }];
+
   return (
-    <div style={wrap} onContextMenu={onPanelContext}>
-      {ctxMenu && (
-        <ContextMenu
-          x={ctxMenu.x}
-          y={ctxMenu.y}
-          items={ctxItems}
-          onClose={() => setCtxMenu(null)}
-        />
+    <div style={wrap}>
+      {sysMenu && (
+        <ContextMenu x={sysMenu.x} y={sysMenu.y} items={sysItems} onClose={() => setSysMenu(null)} />
+      )}
+      {procMenu && (
+        <ContextMenu x={procMenu.x} y={procMenu.y} items={procItems} onClose={() => setProcMenu(null)} />
       )}
       {noSession && <div style={emptyState}>No active session.</div>}
       {notConnected && (
@@ -450,74 +630,200 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
       )}
       {connected && (
         <div style={{ display: 'contents' }}>
+          {/* Panel-level controls: the window applies to both monitors; the
+              toggle collapses the system charts to focus on the process. */}
           <div style={headerRow}>
+            <button
+              type="button"
+              onClick={() => setShowSystem((s) => !s)}
+              style={sysToggleBtn}
+              data-tip={showSystem ? 'Hide system monitor' : 'Show system monitor'}
+              aria-expanded={showSystem}
+            >
+              <Caret open={showSystem} />
+              System
+            </button>
             <WindowSwitch value={win} onChange={setWin} />
           </div>
 
-          {!running && (
-            <div style={notRunning}>
-              {sampleCount === 0
-                ? 'Starting resource monitor… (the first sample can take a few seconds, longer on Windows)'
-                : 'Resource monitor stalled — no recent samples.'}
-            </div>
+          {/* ─── System monitor area (own right-click menu) ──────────── */}
+          {showSystem && (
+          <div style={areaGroup} onContextMenu={onSystemContext}>
+            {!running && (
+              <div style={notRunning}>
+                {sampleCount === 0
+                  ? 'Starting resource monitor… (the first sample can take a few seconds, longer on Windows)'
+                  : 'Resource monitor stalled — no recent samples.'}
+              </div>
+            )}
+
+            <Card
+              label="CPU"
+              value={latest ? `${Math.round(latest.cpuPct)}%` : '—'}
+              data={series.cpu}
+              color={TOKENS.accent}
+              max={100}
+              slots={points}
+            />
+            <Card
+              label="Memory"
+              value={
+                latest && totalMemGB !== null && memUsedGB !== null
+                  ? `${memUsedGB.toFixed(2)} / ${totalMemGB.toFixed(2)} GB`
+                  : '—'
+              }
+              data={series.mem}
+              color={TOKENS.info}
+              max={100}
+              slots={points}
+              legend={totalMemGB ? `of ${totalMemGB.toFixed(2)} GB` : null}
+            />
+            <Pair
+              label="Disk I/O"
+              slots={points}
+              series={[
+                { name: 'read', value: latest ? formatRate(latest.diskRdKBs) : '—', data: series.diskRd, color: COLOR_READ },
+                { name: 'write', value: latest ? formatRate(latest.diskWrKBs) : '—', data: series.diskWr, color: COLOR_WRITE },
+              ]}
+            />
+            <Pair
+              label="Network"
+              slots={points}
+              series={[
+                { name: 'down', value: latest ? formatRate(latest.netRxKBs) : '—', data: series.netRx, color: COLOR_DOWN },
+                { name: 'up', value: latest ? formatRate(latest.netTxKBs) : '—', data: series.netTx, color: COLOR_UP },
+              ]}
+            />
+
+            {latest && (
+              <div style={footRow}>
+                <span style={footLbl}>UPTIME</span>
+                <span style={footVal}>{formatUptime(latest.uptime)}</span>
+                <span style={{ flex: 1 }} />
+                <span style={footLbl}>LOAD</span>
+                <span style={footVal}>{latest.loadAvg1.toFixed(2)}</span>
+                <span style={{ color: TOKENS.fgMute, fontSize: FS.xs }}>
+                  ({memPct.toFixed(0)}% mem)
+                </span>
+              </div>
+            )}
+          </div>
           )}
 
-          <Card
-            label="CPU"
-            value={latest ? `${Math.round(latest.cpuPct)}%` : '—'}
-            data={series.cpu}
-            color={TOKENS.accent}
-            max={100}
-            slots={points}
-          />
-          <Card
-            label="Memory"
-            value={
-              latest && totalMemGB !== null && memUsedGB !== null
-                ? `${memUsedGB.toFixed(2)} / ${totalMemGB.toFixed(2)} GB`
-                : '—'
-            }
-            data={series.mem}
-            color={TOKENS.info}
-            max={100}
-            slots={points}
-            legend={totalMemGB ? `of ${totalMemGB.toFixed(2)} GB` : null}
-          />
-          <Pair
-            label="Disk I/O"
-            slots={points}
-            series={[
-              { name: 'read', value: latest ? formatRate(latest.diskRdKBs) : '—', data: series.diskRd, color: COLOR_READ },
-              { name: 'write', value: latest ? formatRate(latest.diskWrKBs) : '—', data: series.diskWr, color: COLOR_WRITE },
-            ]}
-          />
-          <Pair
-            label="Network"
-            slots={points}
-            series={[
-              { name: 'down', value: latest ? formatRate(latest.netRxKBs) : '—', data: series.netRx, color: COLOR_DOWN },
-              { name: 'up', value: latest ? formatRate(latest.netTxKBs) : '—', data: series.netTx, color: COLOR_UP },
-            ]}
-          />
+          {/* ─── Process monitor area (own right-click menu) ─────────── */}
+          <div style={areaGroup} onContextMenu={onProcessContext}>
+          <div style={procHeaderRow}>
+            <span style={cardLabel}>Process</span>
+            <span style={{ flex: 1 }} />
+            {proc ? (
+              <>
+                {proc.kind === 'command' && (
+                  <span style={procFollowBadge} data-tip="Follows the process by name across restarts">
+                    by name
+                  </span>
+                )}
+                <span style={procName} data-tip-overflow>
+                  {procLabel}
+                </span>
+                <span style={procPid}>
+                  {proc.kind === 'command'
+                    ? procLatest && procLatest.pid > 0
+                      ? `#${procLatest.pid}`
+                      : 'not running'
+                    : `#${proc.pid}`}
+                </span>
+                <button style={procActionBtn} onClick={() => setPickerOpen(true)} data-tip="Change process">
+                  change
+                </button>
+                <button
+                  style={procActionBtn}
+                  onClick={() => setProc(null)}
+                  data-tip="Stop monitoring"
+                  aria-label="Stop monitoring"
+                >
+                  ✕
+                </button>
+              </>
+            ) : (
+              <button style={procPickBtn} onClick={() => setPickerOpen(true)}>
+                Monitor a process…
+              </button>
+            )}
+          </div>
 
-          {latest && (
-            <div style={footRow}>
-              <span style={footLbl}>UPTIME</span>
-              <span style={footVal}>{formatUptime(latest.uptime)}</span>
-              <span style={{ flex: 1 }} />
-              <span style={footLbl}>LOAD</span>
-              <span style={footVal}>{latest.loadAvg1.toFixed(2)}</span>
-              <span style={{ color: TOKENS.fgMute, fontSize: FS.xs }}>
-                ({memPct.toFixed(0)}% mem)
-              </span>
-            </div>
+          {proc && (
+            <>
+              {proc.kind === 'pid' && !procAlive && (
+                <div style={notRunning}>Process {proc.pid} has exited — no more samples.</div>
+              )}
+              {proc.kind === 'command' && procRunning && !procAlive && (
+                <div style={notRunning}>
+                  No process named “{proc.command}” is running right now — watching for it to start.
+                </div>
+              )}
+              {!procRunning && (
+                <div style={notRunning}>
+                  {procSamples.length === 0
+                    ? 'Starting process monitor…'
+                    : 'Process monitor stalled — no recent samples.'}
+                </div>
+              )}
+              <Card
+                label="Process CPU"
+                value={procLatest ? `${Math.round(procLatest.cpuPct)}%` : '—'}
+                data={procSeries.cpu}
+                color={COLOR_UP}
+                max={procCpuMax}
+                slots={points}
+              />
+              <Card
+                label="Process Memory"
+                value={procLatest ? formatKB(procLatest.memKB) : '—'}
+                data={procSeries.mem}
+                color={COLOR_WRITE}
+                max={procMemMax}
+                slots={points}
+                legend={
+                  procLatest && latest && latest.memTotalKB > 0
+                    ? `${((procLatest.memKB / latest.memTotalKB) * 100).toFixed(1)}% of total`
+                    : null
+                }
+              />
+            </>
+          )}
+          </div>
+
+          {pickerOpen && paneId && (
+            <ProcessPicker
+              paneId={paneId}
+              onClose={() => setPickerOpen(false)}
+              onPick={(t) => {
+                setProc(t);
+                setPickerOpen(false);
+              }}
+            />
           )}
         </div>
       )}
-      {/* Flex spacer so the panel fills the available height and the
-          empty area still responds to right-click. */}
+      {/* Flex spacer so the panel fills the available height below the
+          monitor areas. */}
       <div style={{ flex: '1 1 auto', minHeight: 0 }} />
     </div>
+  );
+}
+
+// Disclosure caret for the system-monitor toggle — points down when the
+// section is shown, right when collapsed.
+function Caret({ open }: { open: boolean }) {
+  return (
+    <svg
+      width={9}
+      height={9}
+      viewBox="0 0 10 10"
+      style={{ flex: '0 0 auto', transform: open ? 'none' : 'rotate(-90deg)', transition: 'transform .12s' }}
+    >
+      <path d="M2 4 L5 7 L8 4" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinecap="round" />
+    </svg>
   );
 }
 
@@ -819,7 +1125,25 @@ function clamp(x: number, a: number, b: number) {
 }
 
 const wrap: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 10, padding: '0 12px 14px' };
+// Each monitor region (system / process) is its own flex column so a
+// right-click anywhere in it — cards or the gaps between them — hits that
+// region's scoped context menu.
+const areaGroup: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 10 };
 const headerRow: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, paddingBottom: 4 };
+const sysToggleBtn: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  appearance: 'none',
+  border: 0,
+  background: 'transparent',
+  cursor: 'pointer',
+  padding: '3px 2px',
+  color: TOKENS.fgMute,
+  font: `600 ${FS.sm}px/1 ${TOKENS.font}`,
+  textTransform: 'uppercase',
+  letterSpacing: '.08em',
+};
 const notRunning: CSSProperties = {
   padding: '6px 10px',
   background: 'rgba(255,200,90,0.10)',
@@ -867,3 +1191,49 @@ const footLbl: CSSProperties = {
 };
 const footVal: CSSProperties = { fontFamily: TOKENS.mono, color: TOKENS.fg };
 const emptyState: CSSProperties = { padding: 16, color: TOKENS.fgMute, fontSize: FS.base };
+const procHeaderRow: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  paddingTop: 6,
+  marginTop: 2,
+  borderTop: `1px solid ${TOKENS.border}`,
+};
+const procName: CSSProperties = {
+  maxWidth: 160,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  font: `${FS.base}px/1 ${TOKENS.mono}`,
+  color: TOKENS.fg,
+};
+const procPid: CSSProperties = { font: `${FS.sm}px/1 ${TOKENS.mono}`, color: TOKENS.fgMute };
+const procFollowBadge: CSSProperties = {
+  font: `600 ${FS.xs}px/1 ${TOKENS.font}`,
+  textTransform: 'uppercase',
+  letterSpacing: '.05em',
+  color: COLOR_UP,
+  border: `1px solid ${TOKENS.border}`,
+  borderRadius: 5,
+  padding: '2px 5px',
+};
+const procActionBtn: CSSProperties = {
+  appearance: 'none',
+  border: `1px solid ${TOKENS.border}`,
+  background: 'rgba(255,255,255,0.04)',
+  color: TOKENS.fgDim,
+  borderRadius: 6,
+  padding: '3px 7px',
+  cursor: 'pointer',
+  font: `500 ${FS.sm}px/1 ${TOKENS.font}`,
+};
+const procPickBtn: CSSProperties = {
+  appearance: 'none',
+  border: `1px solid ${TOKENS.border}`,
+  background: 'rgba(255,255,255,0.05)',
+  color: TOKENS.fgDim,
+  borderRadius: 7,
+  padding: '5px 10px',
+  cursor: 'pointer',
+  font: `500 ${FS.base}px/1 ${TOKENS.font}`,
+};

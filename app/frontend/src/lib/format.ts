@@ -12,6 +12,14 @@ export function formatRelative(ms: number): string {
   return new Date(ms).toLocaleDateString();
 }
 
+// formatKB renders a kibibyte count as a human-readable size (KB / MB / GB).
+// Shared by the resource monitor's memory readouts and the process picker.
+export function formatKB(kb: number): string {
+  if (kb < 1024) return `${kb} KB`;
+  if (kb < 1024 * 1024) return `${(kb / 1024).toFixed(1)} MB`;
+  return `${(kb / 1024 / 1024).toFixed(2)} GB`;
+}
+
 // sanitizeLabel strips characters that aren't plaintext-friendly from a
 // user-facing label (session / macro / workspace names). It keeps Unicode
 // letters and numbers, whitespace, and the three common word separators
