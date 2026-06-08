@@ -48,6 +48,26 @@ type FileClient interface {
 	Close() error
 }
 
+// ClientName returns a short label for a FileClient's backend protocol
+// ("sftp" | "scp" | "ftp" | "s3"), or "" for nil / an unknown type. Used
+// for diagnostic logging so a transfer can report which transport it
+// actually used (SCP is a silent fallback when a host's SFTP subsystem
+// is disabled).
+func ClientName(fc FileClient) string {
+	switch fc.(type) {
+	case *SFTP:
+		return "sftp"
+	case *SCP:
+		return "scp"
+	case *FTP:
+		return "ftp"
+	case *S3:
+		return "s3"
+	default:
+		return ""
+	}
+}
+
 // RemoteReadable / RemoteWritable are OPTIONAL capabilities a FileClient
 // may implement to support direct server-to-server streaming (no local
 // temp file) during a cross-pane copy. CopyRemoteFile streams when the
@@ -115,7 +135,6 @@ func CopyRemoteFile(src FileClient, srcPath string, dst FileClient, dstPath stri
 			return 0, fmt.Errorf("create remote %s: %w", dstPath, err)
 		}
 		stopWatch := watchCancel(cancel, abortCloser(rc), abortCloser(wc))
-		defer stopWatch()
 
 		// Bridge the source→here and here→dest hops with an in-memory pipe
 		// so BOTH halves pipeline at once: a producer goroutine drives
@@ -138,6 +157,12 @@ func CopyRemoteFile(src FileClient, srcPath string, dst FileClient, dstPath stri
 		// surface a late write error a deferred close would swallow.
 		_ = pr.CloseWithError(copyErr)
 		closeErr := wc.Close()
+		stopWatch() // join the cancel watcher before any cleanup
+		if copyErr != nil || closeErr != nil {
+			// Tidy up the half-written remote file the failed/cancelled
+			// stream left at the destination.
+			discardPartial(func() error { return dst.Remove(dstPath) })
+		}
 		if copyErr != nil {
 			return n, copyErr
 		}
@@ -434,10 +459,15 @@ func (s *SFTP) Download(remotePath, localPath string, progress ProgressFunc, can
 	if err != nil {
 		return 0, fmt.Errorf("create local %s: %w", localPath, err)
 	}
-	defer dst.Close()
 	stopWatch := watchCancel(cancel, src, dst)
-	defer stopWatch()
-	return sftpDownloadCopy(dst, src, progress)
+	n, cerr := sftpDownloadCopy(dst, src, progress)
+	stopWatch()     // join the cancel watcher before touching the file
+	_ = dst.Close() // close before any unlink — Windows won't remove an open file
+	if cerr != nil {
+		discardPartial(func() error { return os.Remove(localPath) })
+		return n, cerr
+	}
+	return n, nil
 }
 
 // Upload copies localPath onto remotePath, creating or truncating the
@@ -452,23 +482,48 @@ func (s *SFTP) Upload(localPath, remotePath string, progress ProgressFunc, cance
 	if err != nil {
 		return 0, fmt.Errorf("create remote %s: %w", remotePath, err)
 	}
-	defer dst.Close()
 	stopWatch := watchCancel(cancel, src, dst)
-	defer stopWatch()
-	return sftpUploadCopy(dst, src, progress)
+	n, cerr := sftpUploadCopy(dst, src, progress)
+	stopWatch()
+	_ = dst.Close()
+	if cerr != nil {
+		discardPartial(func() error { return s.c.Remove(remotePath) })
+		return n, cerr
+	}
+	return n, nil
 }
 
+// discardPartial removes a destination that a failed or cancelled transfer
+// left half-written, so a cancelled/aborted job never leaves a truncated
+// file behind. Any prior contents were already gone the instant the
+// transfer truncated the destination on open, so the partial is never
+// worth keeping. Best-effort: a remove error (e.g. the file was never
+// created) is ignored. The destination handle must already be closed —
+// Windows refuses to unlink an open file.
+func discardPartial(remove func() error) { _ = remove() }
+
 // watchCancel spawns a goroutine that closes the given handles the
-// moment `cancel` fires. Returns a stop func the caller defers to
-// shut the goroutine down on the normal-completion path. When the
-// handles get closed mid-flight the in-flight pkg/sftp pipeline
-// fails immediately instead of waiting for queued requests to drain.
+// moment `cancel` fires. Returns a stop func the caller calls once the
+// copy has finished, to shut the goroutine down. When the handles get
+// closed mid-flight the in-flight pkg/sftp pipeline fails immediately
+// instead of waiting for queued requests to drain.
+//
+// stop() BLOCKS until the goroutine has returned — including any in-flight
+// Close it was mid-way through. Callers that unlink the destination after a
+// cancel rely on this: two goroutines closing the same *os.File race in
+// Go's poll FD (the loser's Close returns ErrClosed before the winner's
+// CloseHandle syscall completes), and on Windows os.Remove then fails with
+// a sharing violation against the not-yet-released handle. Joining here
+// guarantees the watcher's Close is done before the caller removes the file.
+// Because stop() now joins, call it BEFORE the unlink — not via defer.
 func watchCancel(cancel <-chan struct{}, closers ...io.Closer) func() {
 	if cancel == nil {
 		return func() {}
 	}
 	done := make(chan struct{})
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		select {
 		case <-cancel:
 			for _, c := range closers {
@@ -479,7 +534,10 @@ func watchCancel(cancel <-chan struct{}, closers ...io.Closer) func() {
 		case <-done:
 		}
 	}()
-	return func() { close(done) }
+	return func() {
+		close(done)
+		<-finished
+	}
 }
 
 // sftpUploadCopy routes through io.Copy so *sftp.File.ReadFrom is
@@ -516,7 +574,17 @@ func (p *progressReaderWrap) Read(b []byte) (int, error) {
 		p.written += int64(n)
 		if p.progress != nil {
 			if perr := p.progress(p.written); perr != nil {
-				return n, perr
+				// Report 0 bytes alongside the cancellation error. pkg/sftp's
+				// sequential ReadFrom (the upload + cross-pane streaming path)
+				// fills its buffer with io.ReadFull, which DISCARDS a non-nil
+				// error whenever the buffer came back full — so a (n, err)
+				// return where n == len(b) is silently swallowed and the
+				// transfer streams on to completion (frozen progress bar, file
+				// still growing). A (0, err) return can't be swallowed: it
+				// always propagates and aborts the copy. The discarded bytes
+				// don't matter — we're cancelling, and the partial destination
+				// is unlinked by the caller.
+				return 0, perr
 			}
 		}
 	}
@@ -586,9 +654,7 @@ func (s *SFTP) UploadDir(localDir, remoteDir string, progress ProgressFunc, canc
 		if err != nil {
 			return err
 		}
-		defer dst.Close()
 		stopWatch := watchCancel(cancel, src, dst)
-		defer stopWatch()
 		base := written
 		n, cerr := sftpUploadCopy(dst, src, func(localBytes int64) error {
 			if progress != nil {
@@ -596,7 +662,15 @@ func (s *SFTP) UploadDir(localDir, remoteDir string, progress ProgressFunc, canc
 			}
 			return nil
 		})
+		stopWatch()
+		_ = dst.Close() // close before any unlink — Windows won't remove an open file
 		written += n
+		if cerr != nil {
+			// Drop the half-written current remote file (completed ones
+			// stay) so a cancelled tree upload leaves no truncated artifact
+			// — matching single-file Upload and SCP.UploadDir.
+			discardPartial(func() error { return s.c.Remove(remote) })
+		}
 		return cerr
 	})
 	return written, walkErr
@@ -657,6 +731,10 @@ func (s *SFTP) DownloadDir(remoteDir, localDir string, progress ProgressFunc, ca
 		dst.Close()
 		written += n
 		if cerr != nil {
+			// Drop the half-written current file (the completed ones
+			// stay) so a cancelled tree download leaves no truncated
+			// artifact — matching single-file Download and SCP.DownloadDir.
+			discardPartial(func() error { return os.Remove(local) })
 			return written, cerr
 		}
 	}

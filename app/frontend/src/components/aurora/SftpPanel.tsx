@@ -58,6 +58,7 @@ type Transfer = {
   bytes: number;
   totalBytes?: number;
   error?: string;
+  transport?: string; // backend in use: "sftp" | "scp" | "ftp" | "s3"
   // Timestamp (ms) when the transfer reached a terminal state.
   // Used by the auto-drop ticker so done / error / cancelled rows
   // fade out after a brief cool-down.
@@ -253,6 +254,15 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
   useEffect(() => {
     if (!paneId) return;
     const off = EventsOn(`sftp:transfer:${paneId}`, (p: Transfer) => {
+      // Dev-console trace: the first running event carries the backend
+      // protocol (sftp/scp/ftp/s3 — SCP is a silent fallback for
+      // SFTP-disabled hosts); terminal events log the outcome. Open
+      // DevTools → Console to see which transport a transfer used.
+      if (p.state === 'running') {
+        if (p.transport) console.log(`[transfer] ${p.kind} via ${p.transport} — ${p.path}`);
+      } else {
+        console.log(`[transfer] ${p.kind} ${p.state} — ${p.path}`);
+      }
       setTransfers((cur) => {
         const idx = cur.findIndex((t) => t.id === p.id);
         // Backend only sends totalBytes on the first running event; merge

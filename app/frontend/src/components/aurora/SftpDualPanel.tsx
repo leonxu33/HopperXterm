@@ -256,6 +256,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
         bytes?: number;
         totalBytes?: number;
         error?: string;
+        transport?: string;
       }) => {
         let isFirstEvent = false;
         setTransfers((cur) => {
@@ -286,6 +287,19 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
         // logged — running ticks fire ~10 Hz and would drown the log.
         const fname = p.path.split(/[\\/]/).pop() || p.path;
         const verb = p.kind === 'upload' ? 'Upload' : 'Download';
+        // Dev-console trace of every transfer: the first running event
+        // carries the backend protocol (sftp/scp/ftp/s3 — SCP is a silent
+        // fallback for SFTP-disabled hosts), and each terminal event logs
+        // the outcome. Open DevTools → Console to see which transport a
+        // transfer used.
+        if (isFirstEvent && p.state === 'running') {
+          console.log(
+            `[transfer] ${p.kind} via ${p.transport || 'unknown'} — ${p.path}` +
+              (p.totalBytes ? ` (${formatSize(p.totalBytes)})` : ''),
+          );
+        } else if (p.state !== 'running') {
+          console.log(`[transfer] ${p.kind} ${p.state} — ${p.path} (${formatSize(p.bytes ?? 0)})`);
+        }
         if (isFirstEvent && p.state === 'running') {
           appendLog(
             'dim',

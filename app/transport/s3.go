@@ -326,8 +326,13 @@ func (s *S3) Download(remotePath, localPath string, progress ProgressFunc, _ <-c
 	if err != nil {
 		return 0, err
 	}
-	defer dst.Close()
-	return copyWithProgress(dst, out.Body, progress)
+	n, cerr := copyWithProgress(dst, out.Body, progress)
+	_ = dst.Close() // close before any unlink — Windows won't remove an open file
+	if cerr != nil {
+		discardPartial(func() error { return os.Remove(localPath) })
+		return n, cerr
+	}
+	return n, nil
 }
 
 // Upload streams localPath to remotePath.

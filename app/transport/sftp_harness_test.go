@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -187,6 +188,154 @@ func TestSFTP_UploadDownloadRoundTrip(t *testing.T) {
 	got, _ := os.ReadFile(localDst)
 	if string(got) != string(payload) {
 		t.Errorf("round-trip mismatch: %d bytes differ", len(got))
+	}
+}
+
+// A cancelled (or otherwise failed) single-file transfer must not leave a
+// truncated artifact at the destination: the half-written local file from a
+// download, or the half-written remote file from an upload, gets unlinked.
+func TestSFTP_CancelledTransferRemovesPartialDest(t *testing.T) {
+	s := newTestSFTP(t)
+	base := t.TempDir()
+
+	payload := make([]byte, 256*1024) // big enough to span multiple chunks
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	// cancelOnFirstTick reproduces a real cancel: the first progress tick
+	// closes the cancel channel (so watchCancel tears the handles down,
+	// just as CancelTransfer does) and returns the cancelled error the
+	// throttle would surface.
+	cancelOnFirstTick := func(cancel chan struct{}) ProgressFunc {
+		return func(int64) error {
+			select {
+			case <-cancel:
+			default:
+				close(cancel)
+			}
+			return errors.New("cancelled")
+		}
+	}
+
+	// Download: the local destination must be gone after a cancel.
+	remoteSrc := remotePath(base) + "/src.bin"
+	if err := os.WriteFile(filepath.FromSlash(remoteSrc), payload, 0o644); err != nil {
+		t.Fatalf("seed remote src: %v", err)
+	}
+	localDst := filepath.Join(base, "partial-download.bin")
+	dlCancel := make(chan struct{})
+	if _, err := s.Download(remoteSrc, localDst, cancelOnFirstTick(dlCancel), dlCancel); err == nil {
+		t.Fatal("expected a cancelled download to error")
+	}
+	if _, err := os.Stat(localDst); !os.IsNotExist(err) {
+		t.Errorf("cancelled download left a local file behind: stat err = %v", err)
+	}
+
+	// Upload: the remote destination must be gone after a cancel.
+	localSrc := filepath.Join(base, "src.bin")
+	if err := os.WriteFile(localSrc, payload, 0o644); err != nil {
+		t.Fatalf("write local src: %v", err)
+	}
+	remoteDst := remotePath(base) + "/partial-upload.bin"
+	ulCancel := make(chan struct{})
+	if _, err := s.Upload(localSrc, remoteDst, cancelOnFirstTick(ulCancel), ulCancel); err == nil {
+		t.Fatal("expected a cancelled upload to error")
+	}
+	if _, err := s.Stat(remoteDst); err == nil {
+		t.Errorf("cancelled upload left a remote file behind")
+	}
+}
+
+// An upload must abort the moment the progress callback signals cancel —
+// even with no cancel channel to tear the handles down. This guards the
+// pkg/sftp io.ReadFull swallow: its sequential ReadFrom fills the buffer
+// with io.ReadFull, which drops a non-nil error on a full buffer, so a
+// (n==len(b), err) progress return used to be ignored and the upload ran
+// to completion. progressReaderWrap now returns (0, err) on cancel, which
+// can't be swallowed. Uses a nil cancel channel so the abort can ONLY come
+// from the progress error, isolating this path from watchCancel.
+func TestSFTP_UploadAbortsOnProgressErrorAlone(t *testing.T) {
+	s := newTestSFTP(t)
+	base := t.TempDir()
+
+	localSrc := filepath.Join(base, "src.bin")
+	payload := make([]byte, 512*1024) // many 32 KiB ReadFrom buffers
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	if err := os.WriteFile(localSrc, payload, 0o644); err != nil {
+		t.Fatalf("write local src: %v", err)
+	}
+
+	cancelAfterFirstTick := func(int64) error { return errors.New("cancelled") }
+	remote := remotePath(base) + "/aborted.bin"
+	n, err := s.Upload(localSrc, remote, cancelAfterFirstTick, nil)
+	if err == nil {
+		t.Fatal("upload must error when the progress callback returns one")
+	}
+	if n == int64(len(payload)) {
+		t.Errorf("upload streamed the whole %d-byte file despite a cancel on the first tick", n)
+	}
+	// And the half-written remote file must be gone (transport cleanup).
+	if _, statErr := s.Stat(remote); statErr == nil {
+		t.Errorf("aborted upload left a remote file behind")
+	}
+}
+
+// A cancelled directory transfer must not leave the half-written current
+// file behind either — DownloadDir / UploadDir clean up the in-progress
+// file the same way the single-file paths do.
+func TestSFTP_CancelledDirTransferRemovesPartialFile(t *testing.T) {
+	s := newTestSFTP(t)
+	base := t.TempDir()
+
+	payload := make([]byte, 256*1024)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	cancelOnFirstTick := func(cancel chan struct{}) ProgressFunc {
+		return func(int64) error {
+			select {
+			case <-cancel:
+			default:
+				close(cancel)
+			}
+			return errors.New("cancelled")
+		}
+	}
+
+	// DownloadDir: one-file remote tree → cancel mid-file → no local file.
+	remoteTree := remotePath(base) + "/rtree"
+	if err := s.Mkdir(remoteTree, true); err != nil {
+		t.Fatalf("mkdir remote tree: %v", err)
+	}
+	if err := os.WriteFile(filepath.FromSlash(remoteTree+"/big.bin"), payload, 0o644); err != nil {
+		t.Fatalf("seed remote tree file: %v", err)
+	}
+	localOut := filepath.Join(base, "dl")
+	dlCancel := make(chan struct{})
+	if _, err := s.DownloadDir(remoteTree, localOut, cancelOnFirstTick(dlCancel), dlCancel); err == nil {
+		t.Fatal("expected a cancelled DownloadDir to error")
+	}
+	if _, err := os.Stat(filepath.Join(localOut, "big.bin")); !os.IsNotExist(err) {
+		t.Errorf("cancelled DownloadDir left a partial local file: stat err = %v", err)
+	}
+
+	// UploadDir: one-file local tree → cancel mid-file → no remote file.
+	localTree := filepath.Join(base, "ltree")
+	if err := os.MkdirAll(localTree, 0o755); err != nil {
+		t.Fatalf("mkdir local tree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localTree, "big.bin"), payload, 0o644); err != nil {
+		t.Fatalf("seed local tree file: %v", err)
+	}
+	remoteOut := remotePath(base) + "/ul"
+	ulCancel := make(chan struct{})
+	if _, err := s.UploadDir(localTree, remoteOut, cancelOnFirstTick(ulCancel), ulCancel); err == nil {
+		t.Fatal("expected a cancelled UploadDir to error")
+	}
+	if _, err := s.Stat(remoteOut + "/big.bin"); err == nil {
+		t.Errorf("cancelled UploadDir left a partial remote file behind")
 	}
 }
 

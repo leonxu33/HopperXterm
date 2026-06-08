@@ -231,8 +231,13 @@ func (f *FTP) Download(remotePath, localPath string, progress ProgressFunc, _ <-
 	if err != nil {
 		return 0, fmt.Errorf("create local %s: %w", localPath, err)
 	}
-	defer dst.Close()
-	return copyWithProgress(dst, r, progress)
+	n, cerr := copyWithProgress(dst, r, progress)
+	_ = dst.Close() // close before any unlink — Windows won't remove an open file
+	if cerr != nil {
+		discardPartial(func() error { return os.Remove(localPath) })
+		return n, cerr
+	}
+	return n, nil
 }
 
 // Upload streams localPath onto remotePath.
@@ -279,8 +284,12 @@ func (f *FTP) Upload(localPath, remotePath string, progress ProgressFunc, _ <-ch
 	}()
 	if err := f.c.Stor(remotePath, pr); err != nil {
 		_ = pr.CloseWithError(err)
+		discardPartial(func() error { return f.Remove(remotePath) })
 		return 0, fmt.Errorf("stor %s: %w", remotePath, err)
 	}
 	res := <-done
+	if res.err != nil {
+		discardPartial(func() error { return f.Remove(remotePath) })
+	}
 	return res.written, res.err
 }

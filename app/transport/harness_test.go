@@ -270,6 +270,30 @@ func runExec(ch ssh.Channel, cmd string) {
 		scpSink(ch, scpPathArg(cmd))
 		return
 	}
+	// File-management commands the SCP transport issues (List `ls -la`,
+	// Stat `ls -lad`, Mkdir, Remove) — backed by the real harness host FS,
+	// just like scp -f/-t. Without these they'd fall through to the
+	// resource-monitor stream below and hang the exec forever.
+	if strings.HasPrefix(cmd, "ls -lad -- ") {
+		scpLS(ch, scpPathArg(cmd), false)
+		return
+	}
+	if strings.HasPrefix(cmd, "ls -la -- ") {
+		scpLS(ch, scpPathArg(cmd), true)
+		return
+	}
+	if strings.HasPrefix(cmd, "rm -- ") || strings.HasPrefix(cmd, "rmdir -- ") {
+		scpExit(ch, os.Remove(scpPathArg(cmd)))
+		return
+	}
+	if strings.HasPrefix(cmd, "mkdir -p -- ") {
+		scpExit(ch, os.MkdirAll(scpPathArg(cmd), 0o755))
+		return
+	}
+	if strings.HasPrefix(cmd, "mkdir -- ") {
+		scpExit(ch, os.Mkdir(scpPathArg(cmd), 0o755))
+		return
+	}
 	// Owner/Group name resolution (SFTP.ensureIDMaps) — canned getent output.
 	if strings.Contains(cmd, "getent passwd") {
 		_, _ = io.WriteString(ch, "root:x:0:0:root:/root:/bin/bash\ntestuser:x:1000:1000:Test User:/home/testuser:/bin/bash\n")
@@ -334,6 +358,55 @@ func scpPathArg(cmd string) string {
 		arg = strings.ReplaceAll(arg[1:len(arg)-1], `'\''`, "'")
 	}
 	return arg
+}
+
+// scpExit closes the exec with status 0 on success, 1 (with the error on
+// stdout) otherwise — matching how the SCP transport reads run() results.
+func scpExit(ch ssh.Channel, err error) {
+	if err != nil {
+		_, _ = io.WriteString(ch, err.Error()+"\n")
+		sendExit(ch, 1)
+		return
+	}
+	sendExit(ch, 0)
+}
+
+// scpLS emulates `ls -la`/`ls -lad` against the real host FS. listContents
+// distinguishes List (`ls -la <dir>` → the dir's entries) from Stat
+// (`ls -lad <path>` → the path itself). A missing path exits non-zero with
+// empty stdout, so SCP.Stat surfaces "cannot stat" and SCP.Remove falls
+// through to its `rm` branch.
+func scpLS(ch ssh.Channel, p string, listContents bool) {
+	fi, err := os.Stat(p)
+	if err != nil {
+		sendExit(ch, 1)
+		return
+	}
+	var b strings.Builder
+	if listContents && fi.IsDir() {
+		ents, _ := os.ReadDir(p)
+		for _, de := range ents {
+			if info, ierr := de.Info(); ierr == nil {
+				b.WriteString(lsLongLine(de.Name(), info))
+			}
+		}
+	} else {
+		b.WriteString(lsLongLine(filepath.Base(p), fi))
+	}
+	_, _ = io.WriteString(ch, b.String())
+	sendExit(ch, 0)
+}
+
+// lsLongLine renders one `ls -l`-format row that ftpc.ParseUnixListLine
+// (the SCP transport's listing parser) accepts: a 10-char mode string,
+// link count, owner, group, size, "Mon _2 15:04" timestamp, and name.
+func lsLongLine(name string, fi os.FileInfo) string {
+	perm := "-rw-r--r--"
+	if fi.IsDir() {
+		perm = "drwxr-xr-x"
+	}
+	return fmt.Sprintf("%s 1 owner group %d %s %s\n",
+		perm, fi.Size(), fi.ModTime().Format("Jan 2 15:04"), name)
 }
 
 // scpSource emulates `scp -f <path>`: wait for the client's readiness byte,

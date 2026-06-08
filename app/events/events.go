@@ -90,6 +90,11 @@ type SftpTransferPayload struct {
 	Bytes      int64  `json:"bytes"`
 	TotalBytes int64  `json:"totalBytes,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// Transport is the file backend in use ("sftp" | "scp" | "ftp" | "s3").
+	// Rides on the first running event so the UI can show / log which
+	// protocol a transfer actually used (SCP is a fallback for SFTP-disabled
+	// hosts). Empty on the lean terminal events.
+	Transport string `json:"transport,omitempty"`
 }
 
 // EmitSftpTransfer emits a transfer progress update for the given pane.

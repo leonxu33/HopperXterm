@@ -12,6 +12,16 @@ import (
 	"hopperxterm/transport"
 )
 
+// fileClientName returns a short label for the pane's active file backend
+// ("sftp"/"scp"/"ftp"/"s3"), or "" if none is open yet. Best-effort, for
+// diagnostic logging on transfer events — never opens a client itself.
+func (p *Pane) fileClientName() string {
+	p.fileMu.Lock()
+	fc := p.file
+	p.fileMu.Unlock()
+	return transport.ClientName(fc)
+}
+
 // fileClient returns whichever file backend powers this pane.
 // For FTP / S3 / standalone SFTP panes, it was opened eagerly at
 // connect time. For SSH-backed panes, it's lazily opened against the
@@ -154,10 +164,11 @@ func (p *Pane) runTransfer(
 			ID: id, Kind: kind, Path: remotePath, State: state,
 			Bytes: written, Error: errMsg,
 		}
-		// TotalBytes rides only on the running events (matching the
-		// throttle), so terminal events keep their lean payload.
+		// TotalBytes + Transport ride only on the running events (matching
+		// the throttle), so terminal events keep their lean payload.
 		if state == "running" {
 			payload.TotalBytes = total
+			payload.Transport = p.fileClientName()
 		}
 		events.EmitSftpTransfer(p.appCtx, p.ID, payload)
 	}

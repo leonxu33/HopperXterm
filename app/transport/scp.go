@@ -466,14 +466,15 @@ func (s *SCP) Download(remotePath, localPath string, progress ProgressFunc, canc
 		return 0, fmt.Errorf("create local %s: %w", localPath, err)
 	}
 	stop := watchCancel(cancel, closerFunc(src.abort), dst)
-	defer stop()
 	n, cerr := sftpDownloadCopy(dst, src, progress)
-	_ = dst.Close()
+	stop()          // join the cancel watcher before touching the file
+	_ = dst.Close() // close before any unlink — Windows won't remove an open file
 	if cerr != nil {
 		_ = src.abort() // copy failed (watchCancel only fires on external cancel)
+		discardPartial(func() error { return os.Remove(localPath) })
 		return n, cerr
 	}
-	return n, src.Close() // finalize the protocol (deferred stop is then a no-op)
+	return n, src.Close() // finalize the protocol
 }
 
 // Upload copies localPath onto remotePath using scp sink mode (`scp -t`).
@@ -492,10 +493,13 @@ func (s *SCP) Upload(localPath, remotePath string, progress ProgressFunc, cancel
 		return 0, err
 	}
 	stop := watchCancel(cancel, f, closerFunc(sink.abort))
-	defer stop()
 	n, cerr := sftpUploadCopy(sink, f, progress)
+	stop() // join the cancel watcher before any cleanup
 	if cerr != nil {
 		_ = sink.abort() // copy failed (watchCancel only fires on external cancel)
+		// abort killed the session; s.Remove opens a fresh one to unlink
+		// the partial file the remote scp left behind.
+		discardPartial(func() error { return s.Remove(remotePath) })
 		return n, cerr
 	}
 	return n, sink.Close()

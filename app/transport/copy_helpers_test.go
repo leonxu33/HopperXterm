@@ -107,8 +107,16 @@ func TestSftpDownloadCopy_WithAndWithoutProgress(t *testing.T) {
 func TestProgressReaderWrap_PropagatesError(t *testing.T) {
 	pr := &progressReaderWrap{r: strings.NewReader("abc"), progress: func(int64) error { return errors.New("stop") }}
 	buf := make([]byte, 8)
-	if _, err := pr.Read(buf); err == nil {
-		t.Error("expected progress error to surface from Read")
+	// Must report 0 bytes alongside the error: pkg/sftp's sequential
+	// ReadFrom fills its buffer with io.ReadFull, which discards a non-nil
+	// error on a full read — so a (n>0, err) return would be swallowed and
+	// the cancel ignored. (0, err) always propagates.
+	n, err := pr.Read(buf)
+	if err == nil {
+		t.Fatal("expected progress error to surface from Read")
+	}
+	if n != 0 {
+		t.Errorf("cancelling Read must report 0 bytes so io.ReadFull can't swallow the error, got n=%d", n)
 	}
 }
 
@@ -134,6 +142,24 @@ func TestS3ProgressReader_CountsBytes(t *testing.T) {
 	}
 	if total != 10 || seen != 10 {
 		t.Errorf("read %d (progress saw %d), want 10", total, seen)
+	}
+}
+
+func TestClientName(t *testing.T) {
+	cases := []struct {
+		fc   FileClient
+		want string
+	}{
+		{&SFTP{}, "sftp"},
+		{&SCP{}, "scp"},
+		{&FTP{}, "ftp"},
+		{&S3{}, "s3"},
+		{nil, ""},
+	}
+	for _, c := range cases {
+		if got := ClientName(c.fc); got != c.want {
+			t.Errorf("ClientName(%T) = %q, want %q", c.fc, got, c.want)
+		}
 	}
 }
 
