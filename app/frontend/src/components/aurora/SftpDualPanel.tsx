@@ -26,6 +26,7 @@ import {
   LocalMkdir,
   LocalRemove,
   LocalRename,
+  PickDirectory,
   SftpCreate,
   SftpCwd,
   SftpDownloadDir,
@@ -44,6 +45,12 @@ import { runWithConcurrency } from '../../lib/concurrency';
 import { type Entry, sortRows, formatSize, formatDate, formatMode, withParentRow, isExec } from '../../lib/fileBrowser';
 import { FileTable, RenameInput, type ColDef } from './FileTable';
 import { EventsOn } from '../../../wailsjs/runtime/runtime';
+
+// Private dataTransfer type for an in-panel local⇄remote file drag. Marks
+// the drag as "one of ours" during dragover (when getData is unreadable in
+// WebView2); the actual descriptor rides in dragRef. Distinct from the
+// cross-pane REMOTE_FILES_MIME so the two systems never collide.
+const DUAL_DRAG_MIME = 'application/x-hopper-dualfile';
 
 type LogEntry = { ts: number; level: 'ok' | 'err' | 'dim'; message: string };
 
@@ -200,6 +207,20 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
   // ── Pane refs for outside-click deselect ──────────────────────────
   const localPaneRef = useRef<HTMLDivElement | null>(null);
   const remotePaneRef = useRef<HTMLDivElement | null>(null);
+
+  // ── Refresh-button spin state (one per side) ──────────────────────
+  // Mirrors SftpPanel: the icon rotates 360° over .6s on each refresh.
+  const [localRefreshing, setLocalRefreshing] = useState(false);
+  const [remoteRefreshing, setRemoteRefreshing] = useState(false);
+
+  // ── Local⇄Remote drag-and-drop state ──────────────────────────────
+  // dragRef holds the in-flight drag (which side it started on + the
+  // dragged names). dropSide/dropFolder drive the drop affordance on the
+  // OPPOSITE pane: a folder row under the cursor highlights (dropFolder),
+  // otherwise the whole pane shows the "Upload/Download here" overlay.
+  const dragRef = useRef<{ side: 'local' | 'remote'; names: string[] } | null>(null);
+  const [dropSide, setDropSide] = useState<'local' | 'remote' | null>(null);
+  const [dropFolder, setDropFolder] = useState<string | null>(null);
 
   const loadRemote = useCallback(
     async (path?: string) => {
@@ -463,27 +484,30 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
 
   // ── Action handlers (upload / download / mkdir / new file / delete) ─
   const localJoin = (n: string) => joinPath(localCwd, n);
-  const remoteJoin = (n: string) => {
-    // Force POSIX-style separator for remote SFTP / FTP / S3 paths.
-    return remoteCwd.endsWith('/') ? `${remoteCwd}${n}` : `${remoteCwd}/${n}`;
-  };
-  const onUploadSelected = async () => {
-    if (!paneId) return;
-    const names = [...localSel].filter((n) => n !== '..');
-    if (names.length === 0) return;
-    // Directories use the recursive Upload/DownloadDir methods (one
-    // transfer ID per tree); files use the single-file method. The
-    // worker pool fans out 4-at-a-time so a multi-file selection
-    // doesn't serialise on a single SSH channel — pkg/sftp
-    // multiplexes the underlying requests.
+  const remoteJoin = (n: string) => remoteJoinInto(remoteCwd, n);
+  // POSIX-style join for remote SFTP / FTP / S3 paths into an explicit dir
+  // (the dir may be the current cwd or a folder row a drag landed on).
+  const remoteJoinInto = (dir: string, n: string) =>
+    dir.endsWith('/') ? `${dir}${n}` : `${dir}/${n}`;
+
+  // uploadNames / downloadNames are the shared engines behind both the
+  // toolbar buttons (destDir = the opposite pane's cwd) and drag-and-drop
+  // (destDir = the folder the drop landed on, or that pane's cwd).
+  //
+  // Directories use the recursive Upload/DownloadDir methods (one transfer
+  // ID per tree); files use the single-file method. The worker pool fans
+  // out 4-at-a-time so a multi-file selection doesn't serialise on a single
+  // SSH channel — pkg/sftp multiplexes the underlying requests.
+  const uploadNames = async (names: string[], destDir: string) => {
+    if (!paneId || names.length === 0) return;
     await runWithConcurrency(names, 4, async (n) => {
       const e = localEntries.find((x) => x.name === n);
       if (!e) return;
       try {
         if (e.isDir) {
-          await SftpUploadDir(paneId, localJoin(n), remoteJoin(n));
+          await SftpUploadDir(paneId, localJoin(n), remoteJoinInto(destDir, n));
         } else {
-          await SftpUploadFile(paneId, localJoin(n), remoteJoin(n));
+          await SftpUploadFile(paneId, localJoin(n), remoteJoinInto(destDir, n));
         }
       } catch (err) {
         setRemoteErr(String(err));
@@ -491,18 +515,16 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     });
     void loadRemote(remoteCwd);
   };
-  const onDownloadSelected = async () => {
-    if (!paneId) return;
-    const names = [...remoteSel].filter((n) => n !== '..');
-    if (names.length === 0) return;
+  const downloadNames = async (names: string[], destDir: string) => {
+    if (!paneId || names.length === 0) return;
     await runWithConcurrency(names, 4, async (n) => {
       const e = remoteEntries.find((x) => x.name === n);
       if (!e) return;
       try {
         if (e.isDir) {
-          await SftpDownloadDir(paneId, remoteJoin(n), localJoin(n));
+          await SftpDownloadDir(paneId, remoteJoin(n), joinPath(destDir, n));
         } else {
-          await SftpDownloadFile(paneId, remoteJoin(n), localJoin(n));
+          await SftpDownloadFile(paneId, remoteJoin(n), joinPath(destDir, n));
         }
       } catch (err) {
         setLocalErr(String(err));
@@ -510,6 +532,161 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     });
     void loadLocal(localCwd);
   };
+  const onUploadSelected = () =>
+    void uploadNames([...localSel].filter((n) => n !== '..'), remoteCwd);
+  const onDownloadSelected = () =>
+    void downloadNames([...remoteSel].filter((n) => n !== '..'), localCwd);
+
+  // ── Refresh (with spin) ───────────────────────────────────────────
+  const doLocalRefresh = async () => {
+    setLocalRefreshing(true);
+    try {
+      await loadLocal(localCwd);
+    } finally {
+      setTimeout(() => setLocalRefreshing(false), 600);
+    }
+  };
+  const doRemoteRefresh = async () => {
+    setRemoteRefreshing(true);
+    try {
+      await loadRemote(remoteCwd);
+    } finally {
+      setTimeout(() => setRemoteRefreshing(false), 600);
+    }
+  };
+
+  // ── Browse for a local folder (native directory picker) ───────────
+  const onLocalBrowse = async () => {
+    try {
+      const dir = await PickDirectory('Open folder');
+      if (dir) void loadLocal(dir);
+    } catch (e) {
+      setLocalErr(String(e));
+    }
+  };
+
+  // ── Local⇄Remote drag-and-drop handlers ───────────────────────────
+  // Resolve where a drop lands: dropping onto a directory row copies INTO
+  // that folder; anywhere else (empty space, a file row, "..") copies into
+  // the pane's current folder. Walks up from the event target to the
+  // FileTable row, which carries data-entry-name / data-entry-dir.
+  const resolveDrop = (
+    e: React.DragEvent,
+    baseCwd: string,
+    into: (dir: string, name: string) => string,
+  ): { dir: string; folder: string | null } => {
+    let el = e.target as HTMLElement | null;
+    const container = e.currentTarget as HTMLElement;
+    while (el && el !== container) {
+      const name = el.dataset?.entryName;
+      if (name) {
+        if (el.dataset.entryDir === '1' && name !== '..') {
+          return { dir: into(baseCwd, name), folder: name };
+        }
+        return { dir: baseCwd, folder: null };
+      }
+      el = el.parentElement;
+    }
+    return { dir: baseCwd, folder: null };
+  };
+
+  // Begin a drag from a row. If the row is part of the current selection
+  // the whole selection travels; otherwise just that row (and it becomes
+  // the selection). ".." is never draggable.
+  const startRowDrag = (
+    e: React.DragEvent,
+    entry: Entry,
+    side: 'local' | 'remote',
+    sel: Set<string>,
+    setSel: (s: Set<string>) => void,
+    setAnchor: (n: string | null) => void,
+  ) => {
+    if (entry.name === '..') {
+      e.preventDefault();
+      return;
+    }
+    let names: string[];
+    if (sel.has(entry.name)) {
+      names = [...sel].filter((n) => n !== '..');
+    } else {
+      names = [entry.name];
+      setSel(new Set([entry.name]));
+      setAnchor(entry.name);
+    }
+    if (names.length === 0) {
+      e.preventDefault();
+      return;
+    }
+    dragRef.current = { side, names };
+    try {
+      e.dataTransfer.setData(DUAL_DRAG_MIME, names.join('\n'));
+      e.dataTransfer.setData('text/plain', names.join('\n'));
+    } catch {
+      /* WebView2 can throw on setData mid-gesture; dragRef covers us */
+    }
+    e.dataTransfer.effectAllowed = 'copy';
+  };
+
+  // dragenter/dragover on a pane: accept the drop (and show the affordance)
+  // only for an in-panel drag that started on the OPPOSITE side.
+  const onPaneDragHover = (e: React.DragEvent, side: 'local' | 'remote') => {
+    if (!e.dataTransfer.types.includes(DUAL_DRAG_MIME)) return;
+    const drag = dragRef.current;
+    if (!drag || drag.side === side) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    const { folder } =
+      side === 'local'
+        ? resolveDrop(e, localCwd, joinPath)
+        : resolveDrop(e, remoteCwd, remoteJoinInto);
+    // dragover fires continuously — only touch state when the target
+    // actually changes so we don't re-render the (row-heavy) FileTable
+    // every frame of the drag. React bails out when the updater returns
+    // the identical value.
+    setDropSide((prev) => (prev === side ? prev : side));
+    setDropFolder((prev) => (prev === folder ? prev : folder));
+  };
+
+  const onPaneDragLeave = (e: React.DragEvent) => {
+    // dragleave also fires crossing child rows — clear only when the cursor
+    // truly leaves the pane bounds.
+    const r = e.currentTarget.getBoundingClientRect();
+    if (e.clientX <= r.left || e.clientX >= r.right || e.clientY <= r.top || e.clientY >= r.bottom) {
+      setDropSide(null);
+      setDropFolder(null);
+    }
+  };
+
+  const onPaneDrop = (e: React.DragEvent, side: 'local' | 'remote') => {
+    if (!e.dataTransfer.types.includes(DUAL_DRAG_MIME)) return;
+    e.preventDefault();
+    const drag = dragRef.current;
+    setDropSide(null);
+    setDropFolder(null);
+    dragRef.current = null;
+    if (!drag || drag.side === side) return;
+    if (side === 'remote') {
+      // local → remote = upload
+      const { dir } = resolveDrop(e, remoteCwd, remoteJoinInto);
+      void uploadNames(drag.names, dir);
+    } else {
+      // remote → local = download
+      const { dir } = resolveDrop(e, localCwd, joinPath);
+      void downloadNames(drag.names, dir);
+    }
+  };
+
+  // Clear drag state on any dragend so a cancelled drag (Esc / drop
+  // outside) doesn't leave a stale descriptor or overlay.
+  useEffect(() => {
+    const clear = () => {
+      dragRef.current = null;
+      setDropSide(null);
+      setDropFolder(null);
+    };
+    document.addEventListener('dragend', clear);
+    return () => document.removeEventListener('dragend', clear);
+  }, []);
   const onLocalMkdir = () =>
     openPrompt({
       title: 'New folder (local)',
@@ -957,6 +1134,11 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     return () => document.removeEventListener('keydown', onKey);
   }, []);
 
+  // Action buttons (Upload / Download / Delete) are greyed out until that
+  // pane has a real (non-"..") selection.
+  const localHasSel = [...localSel].some((n) => n !== '..');
+  const remoteHasSel = [...remoteSel].some((n) => n !== '..');
+
   return (
     <div style={outer}>
       {/* Body: horizontal split */}
@@ -983,7 +1165,9 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
             onBack={localNavBack}
             onForward={localNavForward}
             onUp={localNavUp}
-            onRefresh={() => void loadLocal(localCwd)}
+            onRefresh={() => void doLocalRefresh()}
+            refreshing={localRefreshing}
+            onBrowse={() => void onLocalBrowse()}
             backDisabled={localCur.current <= 0}
             forwardDisabled={localCur.current + 1 >= localHist.current.length}
             actions={
@@ -1009,7 +1193,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
                     <path d="M7 6 V10 M5 8 H9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
                   </svg>
                 </NavBtn>
-                <NavBtn key="ldel" title="Delete" danger onClick={onLocalDelete}>
+                <NavBtn key="ldel" title="Delete" danger disabled={!localHasSel} onClick={onLocalDelete}>
                   <svg width={ICON.lg} height={ICON.lg} viewBox="0 0 14 14" fill="none">
                     <path
                       d="M3 4 H11 M5 4 V2 H9 V4 M4 4 L4.5 12 H9.5 L10 4"
@@ -1024,6 +1208,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
                   key="lup"
                   title="Upload selected to remote"
                   accent={TOKENS.accent}
+                  disabled={!localHasSel}
                   onClick={() => void onUploadSelected()}
                 >
                   <svg width={ICON.lg} height={ICON.lg} viewBox="0 0 14 14" fill="none">
@@ -1040,32 +1225,46 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
             }
           />
           {localErr && <div style={errBar}>{localErr}</div>}
-          <FileTable
-            rows={sortedLocal}
-            sel={localSel}
-            setSel={setLocalSel}
-            anchor={localAnchor}
-            setAnchor={setLocalAnchor}
-            onRowDouble={localOnRow}
-            onRowContext={onLocalRowContext}
-            onEmptyContext={onLocalEmptyContext}
-            cols={COLS}
-            headerStyle={tableHead}
-            renderCell={(r, k) =>
-              renderDualCell(r, k, renamingLocal, (o, n) => void commitLocalRename(o, n), () =>
-                setRenamingLocal(null),
-              )
-            }
-            sortBy={localSortBy}
-            sortDir={localSortDir}
-            onSort={(k) => {
-              if (k === localSortBy) setLocalSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-              else {
-                setLocalSortBy(k);
-                setLocalSortDir('asc');
+          <div
+            style={dropWrap}
+            onDragEnter={(e) => onPaneDragHover(e, 'local')}
+            onDragOver={(e) => onPaneDragHover(e, 'local')}
+            onDragLeave={onPaneDragLeave}
+            onDrop={(e) => onPaneDrop(e, 'local')}
+          >
+            <FileTable
+              rows={sortedLocal}
+              sel={localSel}
+              setSel={setLocalSel}
+              anchor={localAnchor}
+              setAnchor={setLocalAnchor}
+              onRowDouble={localOnRow}
+              onRowContext={onLocalRowContext}
+              onEmptyContext={onLocalEmptyContext}
+              cols={COLS}
+              headerStyle={tableHead}
+              draggableRows
+              onRowDragStart={(e, entry) =>
+                startRowDrag(e, entry, 'local', localSel, setLocalSel, setLocalAnchor)
               }
-            }}
-          />
+              dropHighlightName={dropSide === 'local' ? dropFolder : null}
+              renderCell={(r, k) =>
+                renderDualCell(r, k, renamingLocal, (o, n) => void commitLocalRename(o, n), () =>
+                  setRenamingLocal(null),
+                )
+              }
+              sortBy={localSortBy}
+              sortDir={localSortDir}
+              onSort={(k) => {
+                if (k === localSortBy) setLocalSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+                else {
+                  setLocalSortBy(k);
+                  setLocalSortDir('asc');
+                }
+              }}
+            />
+            {dropSide === 'local' && !dropFolder && <FileDropOverlay label="Download here" />}
+          </div>
         </div>
 
         <ColDivider onMouseDown={onColDragStart} />
@@ -1086,7 +1285,8 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
             onBack={remoteNavBack}
             onForward={remoteNavForward}
             onUp={remoteNavUp}
-            onRefresh={() => void loadRemote(remoteCwd)}
+            onRefresh={() => void doRemoteRefresh()}
+            refreshing={remoteRefreshing}
             backDisabled={remoteCur.current <= 0}
             forwardDisabled={remoteCur.current + 1 >= remoteHist.current.length}
             mirrored
@@ -1096,6 +1296,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
                   key="rdown"
                   title="Download selected to local"
                   accent={TOKENS.info}
+                  disabled={!remoteHasSel}
                   onClick={() => void onDownloadSelected()}
                 >
                   <svg width={ICON.lg} height={ICON.lg} viewBox="0 0 14 14" fill="none">
@@ -1130,7 +1331,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
                     <path d="M7 6 V10 M5 8 H9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
                   </svg>
                 </NavBtn>
-                <NavBtn key="rdel" title="Delete" danger onClick={onRemoteDelete}>
+                <NavBtn key="rdel" title="Delete" danger disabled={!remoteHasSel} onClick={onRemoteDelete}>
                   <svg width={ICON.lg} height={ICON.lg} viewBox="0 0 14 14" fill="none">
                     <path
                       d="M3 4 H11 M5 4 V2 H9 V4 M4 4 L4.5 12 H9.5 L10 4"
@@ -1144,32 +1345,46 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
             }
           />
           {remoteErr && <div style={errBar}>{remoteErr}</div>}
-          <FileTable
-            rows={sortedRemote}
-            sel={remoteSel}
-            setSel={setRemoteSel}
-            anchor={remoteAnchor}
-            setAnchor={setRemoteAnchor}
-            onRowDouble={remoteOnRow}
-            onRowContext={onRemoteRowContext}
-            onEmptyContext={onRemoteEmptyContext}
-            cols={COLS}
-            headerStyle={tableHead}
-            renderCell={(r, k) =>
-              renderDualCell(r, k, renamingRemote, (o, n) => void commitRemoteRename(o, n), () =>
-                setRenamingRemote(null),
-              )
-            }
-            sortBy={remoteSortBy}
-            sortDir={remoteSortDir}
-            onSort={(k) => {
-              if (k === remoteSortBy) setRemoteSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-              else {
-                setRemoteSortBy(k);
-                setRemoteSortDir('asc');
+          <div
+            style={dropWrap}
+            onDragEnter={(e) => onPaneDragHover(e, 'remote')}
+            onDragOver={(e) => onPaneDragHover(e, 'remote')}
+            onDragLeave={onPaneDragLeave}
+            onDrop={(e) => onPaneDrop(e, 'remote')}
+          >
+            <FileTable
+              rows={sortedRemote}
+              sel={remoteSel}
+              setSel={setRemoteSel}
+              anchor={remoteAnchor}
+              setAnchor={setRemoteAnchor}
+              onRowDouble={remoteOnRow}
+              onRowContext={onRemoteRowContext}
+              onEmptyContext={onRemoteEmptyContext}
+              cols={COLS}
+              headerStyle={tableHead}
+              draggableRows
+              onRowDragStart={(e, entry) =>
+                startRowDrag(e, entry, 'remote', remoteSel, setRemoteSel, setRemoteAnchor)
               }
-            }}
-          />
+              dropHighlightName={dropSide === 'remote' ? dropFolder : null}
+              renderCell={(r, k) =>
+                renderDualCell(r, k, renamingRemote, (o, n) => void commitRemoteRename(o, n), () =>
+                  setRenamingRemote(null),
+                )
+              }
+              sortBy={remoteSortBy}
+              sortDir={remoteSortDir}
+              onSort={(k) => {
+                if (k === remoteSortBy) setRemoteSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+                else {
+                  setRemoteSortBy(k);
+                  setRemoteSortDir('asc');
+                }
+              }}
+            />
+            {dropSide === 'remote' && !dropFolder && <FileDropOverlay label="Upload here" />}
+          </div>
         </div>
       </div>
 
@@ -1542,6 +1757,8 @@ function PaneToolbar({
   onForward,
   onUp,
   onRefresh,
+  refreshing,
+  onBrowse,
   backDisabled,
   forwardDisabled,
   actions,
@@ -1557,6 +1774,8 @@ function PaneToolbar({
   onForward: () => void;
   onUp: () => void;
   onRefresh: () => void;
+  refreshing?: boolean;
+  onBrowse?: () => void;
   backDisabled?: boolean;
   forwardDisabled?: boolean;
   actions?: ReactNode;
@@ -1580,7 +1799,16 @@ function PaneToolbar({
         </svg>
       </NavBtn>
       <NavBtn title="Refresh" onClick={onRefresh}>
-        <svg width={ICON.lg} height={ICON.lg} viewBox="0 0 14 14" fill="none">
+        <svg
+          width={ICON.lg}
+          height={ICON.lg}
+          viewBox="0 0 14 14"
+          fill="none"
+          style={{
+            transition: 'transform .6s',
+            transform: refreshing ? 'rotate(360deg)' : 'rotate(0deg)',
+          }}
+        >
           <path
             d="M11.5 6.5 A4.5 4.5 0 1 0 11 9.2"
             stroke="currentColor"
@@ -1619,9 +1847,57 @@ function PaneToolbar({
         boxShadow: TOKENS.inset,
       }}
     >
-      <svg width={ICON.xs} height={ICON.xs} viewBox="0 0 12 12" fill="none">
-        <path d="M2 4 L2 10 L10 10 L10 5 L6 5 L5 4 Z" stroke={TOKENS.fgDim} strokeWidth="1.2" />
-      </svg>
+      {onBrowse ? (
+        // Local pane: the folder icon is a button that opens the native
+        // directory picker (replaces the static glyph the remote pane keeps).
+        <button
+          type="button"
+          data-tip="Open folder…"
+          onClick={onBrowse}
+          style={{
+            flex: '0 0 auto',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 20,
+            height: 20,
+            margin: '0 -4px 0 -2px',
+            border: 0,
+            borderRadius: 5,
+            background: 'transparent',
+            color: TOKENS.fgDim,
+            cursor: 'pointer',
+            padding: 0,
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'rgba(255,255,255,0.10)';
+            e.currentTarget.style.color = TOKENS.fg;
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'transparent';
+            e.currentTarget.style.color = TOKENS.fgDim;
+          }}
+        >
+          <svg width={ICON.sm} height={ICON.sm} viewBox="0 0 14 14" fill="none">
+            <path
+              d="M2 4.5 A1 1 0 0 1 3 3.5 L5.5 3.5 L6.5 4.5 L11 4.5 A1 1 0 0 1 12 5.5 L12 6 L3 6 Z"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinejoin="round"
+            />
+            <path
+              d="M2.4 6 L12.2 6 L10.7 11 A0.6 0.6 0 0 1 10.1 11.5 L2.5 11.5 A0.6 0.6 0 0 1 1.9 11 Z"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      ) : (
+        <svg width={ICON.xs} height={ICON.xs} viewBox="0 0 12 12" fill="none">
+          <path d="M2 4 L2 10 L10 10 L10 5 L6 5 L5 4 Z" stroke={TOKENS.fgDim} strokeWidth="1.2" />
+        </svg>
+      )}
       <input
         value={path}
         onChange={(e) => onPathChange(e.target.value)}
@@ -1900,6 +2176,58 @@ function FileIcon({ exec }: { exec?: boolean }) {
 }
 
 
+// FileDropOverlay — the drag-over affordance shown while a cross-pane file
+// drag hovers the listing (drop in the current folder; a folder row under
+// the cursor highlights instead via FileTable's dropHighlightName). Mirrors
+// SftpPanel's overlay so the dual browser reads the same.
+function FileDropOverlay({ label }: { label: string }) {
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        pointerEvents: 'none',
+        zIndex: 5,
+        background: 'rgba(8,12,18,0.18)',
+        backdropFilter: 'blur(2px)',
+        WebkitBackdropFilter: 'blur(2px)',
+        borderRadius: 10,
+        border: `1px solid ${TOKENS.accentSoft}`,
+        transition: 'background .12s, border-color .12s',
+      }}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          background: TOKENS.accentDim,
+          boxShadow: `inset 0 0 0 1.5px ${TOKENS.accent}`,
+          borderRadius: 8,
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          left: '50%',
+          top: '50%',
+          transform: 'translate(-50%, -50%)',
+          padding: '6px 12px',
+          borderRadius: 99,
+          background: `linear-gradient(180deg, ${TOKENS.accent}, oklch(0.74 0.14 165))`,
+          color: '#06120e',
+          font: `640 ${FS.base}px/1 ${TOKENS.font}`,
+          letterSpacing: '.04em',
+          boxShadow: `0 10px 24px -10px ${TOKENS.accent}`,
+          textTransform: 'uppercase',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {label}
+      </div>
+    </div>
+  );
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────
 
 function formatTime(ms: number): string {
@@ -1952,4 +2280,14 @@ const errBar: CSSProperties = {
   border: '1px solid rgba(255,90,90,0.22)',
   borderRadius: 6,
   font: `${FS.base}px/1.3 ${TOKENS.mono}`,
+};
+
+// Positioned wrapper around a pane's FileTable so the drag-over overlay
+// (FileDropOverlay) can sit absolutely over the listing.
+const dropWrap: CSSProperties = {
+  position: 'relative',
+  flex: '1 1 auto',
+  minHeight: 0,
+  display: 'flex',
+  flexDirection: 'column',
 };
