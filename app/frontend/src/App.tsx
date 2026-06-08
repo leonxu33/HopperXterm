@@ -1929,19 +1929,30 @@ function App() {
     );
   }, [paneStates]);
 
-  // Resolve a pane's session by id, including in-memory temporary
-  // (quick-connect) sessions that aren't in the saved list. Without this a
+  // Single merged index of every session a pane can reference: saved
+  // sessions (snap.sessions) plus in-memory transient (quick-connect)
+  // sessions, which live only in transientDraftsRef and never appear in
+  // snap.sessions. Keyed on transientIds so the map rebuilds when a temp
+  // session appears/promotes. Both the render path (sessionById, below) and
+  // the resource-poller reconcile (further below) read from this one map, so
+  // they can't disagree on transient sessions — a temp pane that renders is
+  // also visible to the poller.
+  const sessById = useMemo(() => {
+    const m = new Map(snap.sessions.map((s) => [s.id, s]));
+    for (const id of transientIds) {
+      const d = transientDraftsRef.current.get(id);
+      if (d) m.set(id, d as unknown as Session);
+    }
+    return m;
+  }, [snap.sessions, transientIds]);
+
+  // Resolve a pane's session by id (saved or transient). Without this a
   // transient pane falls back to a default shell terminal + "(unnamed)"
   // instead of rendering as its real protocol (e.g. an SFTP browser).
   const sessionById = useCallback(
-    (id: string | null | undefined): Session | undefined => {
-      if (!id) return undefined;
-      const saved = snap.sessions.find((x) => x.id === id);
-      if (saved) return saved;
-      const d = transientDraftsRef.current.get(id);
-      return d ? (d as unknown as Session) : undefined;
-    },
-    [snap.sessions],
+    (id: string | null | undefined): Session | undefined =>
+      id ? sessById.get(id) : undefined,
+    [sessById],
   );
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || null;
@@ -1983,12 +1994,9 @@ function App() {
   // poller per server (user@host:port, or the EC2 key) runs while any tab
   // to that server is open and stops when the last one closes. Reconcile
   // on any change to the open tabs, their pane states, or the sessions
-  // they map to. sessById indexes sessions once so the reconcile (which
-  // fires on every pane-state change) doesn't linear-scan per cell.
-  const sessById = useMemo(
-    () => new Map(snap.sessions.map((s) => [s.id, s])),
-    [snap.sessions],
-  );
+  // they map to. Resolves via the shared sessById map (above) so transient
+  // sessions are included — otherwise a temp pane is invisible to the poller
+  // and the monitor never starts for it.
   useEffect(() => {
     const panes: Array<{ hostKey: string | null; paneId: string; state: PaneState | null }> = [];
     for (const t of tabs) {
