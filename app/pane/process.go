@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"hopperxterm/events"
+	"hopperxterm/logbook"
 	"hopperxterm/transport"
 )
 
@@ -535,6 +536,7 @@ func (p *Pane) startProcessMonitor(spec string, terminal bool, startCmd, stdinSc
 	p.procMon[spec] = mon
 
 	go func() {
+		defer logbook.Recover("pane.processMonitor")
 		defer func() {
 			_ = sess.Close()
 			p.procMu.Lock()

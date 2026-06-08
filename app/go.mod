@@ -13,6 +13,7 @@ require (
 	github.com/wailsapp/wails/v2 v2.12.0
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.52.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (

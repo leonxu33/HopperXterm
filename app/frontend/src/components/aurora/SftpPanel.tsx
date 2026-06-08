@@ -28,6 +28,7 @@ import {
   LocalIsDir,
 } from '../../../wailsjs/go/main/App';
 import { EventsOn, OnFileDrop, OnFileDropOff } from '../../../wailsjs/runtime/runtime';
+import { log } from '../../lib/log';
 import { IconBtn, ContextMenu, WithTip } from './primitives';
 import type { ContextMenuItem } from './primitives';
 import { runWithConcurrency } from '../../lib/concurrency';
@@ -256,12 +257,12 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
     const off = EventsOn(`sftp:transfer:${paneId}`, (p: Transfer) => {
       // Dev-console trace: the first running event carries the backend
       // protocol (sftp/scp/ftp/s3 — SCP is a silent fallback for
-      // SFTP-disabled hosts); terminal events log the outcome. Open
-      // DevTools → Console to see which transport a transfer used.
+      // SFTP-disabled hosts); terminal events log the outcome. Forwarded to
+      // the log file via lib/log so transfers are traceable in production.
       if (p.state === 'running') {
-        if (p.transport) console.log(`[transfer] ${p.kind} via ${p.transport} — ${p.path}`);
+        if (p.transport) log.info(`[transfer] ${p.kind} via ${p.transport} — ${p.path}`);
       } else {
-        console.log(`[transfer] ${p.kind} ${p.state} — ${p.path}`);
+        log.info(`[transfer] ${p.kind} ${p.state} — ${p.path}`);
       }
       setTransfers((cur) => {
         const idx = cur.findIndex((t) => t.id === p.id);

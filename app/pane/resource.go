@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"hopperxterm/events"
+	"hopperxterm/logbook"
 	"hopperxterm/transport"
 )
 
@@ -465,6 +466,7 @@ func (p *Pane) StartResourceMonitor() error {
 	p.resRefs = 1
 
 	go func() {
+		defer logbook.Recover("pane.resourceMonitor")
 		defer func() {
 			_ = sess.Close()
 			p.resMu.Lock()

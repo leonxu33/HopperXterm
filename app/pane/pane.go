@@ -18,6 +18,7 @@ import (
 
 	"hopperxterm/credentials"
 	"hopperxterm/events"
+	"hopperxterm/logbook"
 	"hopperxterm/profile"
 	"hopperxterm/transport"
 )
@@ -275,6 +276,7 @@ func (p *Pane) connectSSHLike(sess profile.Session) error {
 // Runs on its own goroutine so a slow / hanging probe doesn't delay
 // terminal readiness.
 func (p *Pane) probeHostInfo(client *ssh.Client) {
+	defer logbook.Recover("pane.probeHostInfo")
 	info := transport.ProbeHostInfoSSH(client)
 	// Cache the OS family for the resource poller even when the rest of
 	// the probe came back empty (e.g. banners ate the markers).
@@ -1131,6 +1133,7 @@ func (p *Pane) Close() {
 // stream is also scanned for OSC 7 cwd-change sequences so the SFTP
 // panel's "Follow terminal folder" toggle can track the shell's pwd.
 func (p *Pane) readLoop() {
+	defer logbook.Recover("pane.readLoop")
 	buf := make([]byte, 8192)
 	out := p.pty.Stdout()
 	var osc osc7Scanner

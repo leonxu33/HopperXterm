@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"hopperxterm/events"
+	"hopperxterm/logbook"
 )
 
 const (
@@ -23,6 +24,7 @@ const (
 // Disconnected; the read loop's own EOF handling covers the case where
 // the kernel-level TCP error fires before keepalive can.
 func (p *Pane) keepaliveLoop() {
+	defer logbook.Recover("pane.keepaliveLoop")
 	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
 

@@ -7,6 +7,8 @@ import (
 	"context"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"hopperxterm/logbook"
 )
 
 // safeEmit forwards to wails runtime only if ctx carries the Wails events
@@ -73,9 +75,21 @@ func EmitPaneState(ctx context.Context, paneID string, state PaneState, reason s
 	safeEmit(ctx, "pane:state:"+paneID, PaneStatePayload{State: state, Reason: reason})
 }
 
-// EmitConnectionLog emits a structured log entry for the given pane.
+// EmitConnectionLog emits a structured log entry for the given pane to the
+// frontend, and tees it into the persistent log file so connection
+// diagnostics survive past the in-app panel: err→Error, dim→Debug, ok→Info.
 func EmitConnectionLog(ctx context.Context, paneID string, level ConnectionLogLevel, ts int64, message string) {
 	safeEmit(ctx, "connection:log:"+paneID, ConnectionLogPayload{TS: ts, Level: level, Message: message})
+
+	line := "pane " + paneID + ": " + message
+	switch level {
+	case LogErr:
+		logbook.Error(line)
+	case LogDim:
+		logbook.Debug(line)
+	default:
+		logbook.Info(line)
+	}
 }
 
 // SftpTransferPayload mirrors an in-flight upload / download. State

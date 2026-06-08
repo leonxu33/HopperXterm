@@ -45,6 +45,7 @@ import { runWithConcurrency } from '../../lib/concurrency';
 import { type Entry, sortRows, formatSize, formatDate, formatMode, withParentRow, isExec } from '../../lib/fileBrowser';
 import { FileTable, RenameInput, type ColDef } from './FileTable';
 import { EventsOn } from '../../../wailsjs/runtime/runtime';
+import { log } from '../../lib/log';
 
 // Private dataTransfer type for an in-panel local⇄remote file drag. Marks
 // the drag as "one of ours" during dragover (when getData is unreadable in
@@ -308,18 +309,17 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
         // logged — running ticks fire ~10 Hz and would drown the log.
         const fname = p.path.split(/[\\/]/).pop() || p.path;
         const verb = p.kind === 'upload' ? 'Upload' : 'Download';
-        // Dev-console trace of every transfer: the first running event
-        // carries the backend protocol (sftp/scp/ftp/s3 — SCP is a silent
-        // fallback for SFTP-disabled hosts), and each terminal event logs
-        // the outcome. Open DevTools → Console to see which transport a
-        // transfer used.
+        // Trace of every transfer: the first running event carries the
+        // backend protocol (sftp/scp/ftp/s3 — SCP is a silent fallback for
+        // SFTP-disabled hosts), and each terminal event logs the outcome.
+        // Forwarded to the log file via lib/log so it survives in production.
         if (isFirstEvent && p.state === 'running') {
-          console.log(
+          log.info(
             `[transfer] ${p.kind} via ${p.transport || 'unknown'} — ${p.path}` +
               (p.totalBytes ? ` (${formatSize(p.totalBytes)})` : ''),
           );
         } else if (p.state !== 'running') {
-          console.log(`[transfer] ${p.kind} ${p.state} — ${p.path} (${formatSize(p.bytes ?? 0)})`);
+          log.info(`[transfer] ${p.kind} ${p.state} — ${p.path} (${formatSize(p.bytes ?? 0)})`);
         }
         if (isFirstEvent && p.state === 'running') {
           appendLog(

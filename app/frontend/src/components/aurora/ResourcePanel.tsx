@@ -17,6 +17,7 @@ import {
   StopProcessMonitorByCommand,
 } from '../../../wailsjs/go/main/App';
 import { EventsOn } from '../../../wailsjs/runtime/runtime';
+import { log } from '../../lib/log';
 import { ContextMenu } from './primitives';
 import type { ContextMenuItem } from './primitives';
 import { formatKB } from '../../lib/format';
@@ -518,7 +519,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
     try {
       await SaveTextFile(suggested, csv);
     } catch (e) {
-      console.error('SaveTextFile failed:', e);
+      log.error('SaveTextFile failed:', e);
     }
   };
   const onExportCsv = async () => {
@@ -567,10 +568,10 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
     try {
       await SaveTextFile(suggested, csv);
     } catch (e) {
-      // Surface in console — there's no error banner inside this
+      // Surface in the log — there's no error banner inside this
       // panel; the user can re-trigger if the save dialog was OK
       // dismissed before the path was written.
-      console.error('SaveTextFile failed:', e);
+      log.error('SaveTextFile failed:', e);
     }
   };
 

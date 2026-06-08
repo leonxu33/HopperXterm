@@ -10,12 +10,18 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
+
+	"hopperxterm/logbook"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
 func main() {
+	// Bring up the log sink first so anything below (including a failed
+	// wails.Run) lands in the file rather than a swallowed stdout.
+	logbook.Init()
+
 	// Create an instance of the app structure
 	app := NewApp()
 
@@ -73,6 +79,13 @@ func main() {
 		// DWM; Linux rounds them in CSS (see bgColour/linuxOpts above).
 		Frameless: goruntime.GOOS != "darwin",
 		Menu:      appMenu,
+		// Route every backend wailsruntime.Log* AND frontend @wailsapp/runtime
+		// Log* call into the single file sink. LogLevelProduction is set to our
+		// resolved level (Info, not Wails' default of ERROR) so warnings reach
+		// the file in release builds too.
+		Logger:             logbook.WailsLogger(),
+		LogLevel:           logbook.WailsLogLevel(),
+		LogLevelProduction: logbook.WailsLogLevel(),
 		Mac: &mac.Options{
 			TitleBar:   mac.TitleBarHiddenInset(),
 			Appearance: mac.NSAppearanceNameDarkAqua,
@@ -102,6 +115,6 @@ func main() {
 	})
 
 	if err != nil {
-		println("Error:", err.Error())
+		logbook.Error("wails.Run: " + err.Error())
 	}
 }

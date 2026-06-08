@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	goruntime "runtime"
 
 	"hopperxterm/credentials"
 	"hopperxterm/events"
+	"hopperxterm/logbook"
 	"hopperxterm/macro"
 	"hopperxterm/pane"
 	"hopperxterm/prefs"
@@ -66,6 +68,8 @@ func (a *App) AppVersion() string {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
+	logbook.Info("startup: HopperXterm " + a.AppVersion() + " on " + goruntime.GOOS)
+
 	store, err := profile.OpenDefault()
 	if err != nil {
 		wailsruntime.LogErrorf(ctx, "profile: OpenDefault failed, falling back to in-memory: %v", err)
@@ -109,6 +113,8 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.panes != nil {
 		_ = a.panes.CloseAll()
 	}
+	logbook.Info("shutdown")
+	_ = logbook.Close()
 }
 
 // ---- Profile ---------------------------------------------------------------
