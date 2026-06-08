@@ -369,6 +369,15 @@ func (a *App) SftpDownloadDir(paneID, remotePath, localPath string) (uint64, err
 	return a.panes.SftpDownloadDir(paneID, remotePath, localPath)
 }
 
+// SftpCopyRemote copies the named entries from srcDir on the source pane
+// to dstDir on the destination pane — the backend for cross-pane Remote
+// Files drag-and-drop. Bytes stream server-to-server (no disk) for
+// SFTP↔SFTP, with a temp-file fallback for other backend pairs. Progress
+// rides the destination pane's sftp:transfer:{paneID} event channel.
+func (a *App) SftpCopyRemote(srcPaneID, dstPaneID, srcDir string, names []string, dstDir string) (uint64, error) {
+	return a.panes.SftpCopyRemote(srcPaneID, dstPaneID, srcDir, names, dstDir)
+}
+
 // SftpUpload prompts for a local file (via Wails OpenFileDialog) and
 // uploads it to remoteDir. The frontend tracks progress via
 // sftp:transfer:{paneId} events.

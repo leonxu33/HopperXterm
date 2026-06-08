@@ -24,12 +24,20 @@ import {
   SftpRename,
   SftpUploadFile,
   SftpUploadDir,
+  SftpCopyRemote,
   LocalIsDir,
 } from '../../../wailsjs/go/main/App';
 import { EventsOn, OnFileDrop, OnFileDropOff } from '../../../wailsjs/runtime/runtime';
 import { IconBtn, ContextMenu, WithTip } from './primitives';
 import type { ContextMenuItem } from './primitives';
 import { runWithConcurrency } from '../../lib/concurrency';
+import {
+  REMOTE_FILES_MIME,
+  canDropRemoteDrag,
+  getRemoteDrag,
+  setRemoteDrag,
+  type RemoteDrag,
+} from '../../lib/remoteDrag';
 import { type Entry, sortRows, formatSize, formatDate, formatMode, withParentRow, isExec } from '../../lib/fileBrowser';
 import { FileTable, RenameInput, type ColDef } from './FileTable';
 import {
@@ -59,6 +67,9 @@ type Transfer = {
 type Props = {
   paneId: string | null;
   paneState: 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected' | null;
+  // Session this pane is bound to — used to reject cross-pane file drops
+  // between two panes on the same session (same host: a no-op copy).
+  sessionId: string | null;
 };
 
 type ColKey = 'name' | 'size' | 'modTimeMs' | 'owner' | 'group' | 'access';
@@ -94,7 +105,14 @@ function isInternalDrag(e: React.DragEvent): boolean {
   return false;
 }
 
-export function SftpPanel({ paneId, paneState }: Props) {
+/** True for a cross-pane Remote Files drag (one panel's selection dragged
+ *  onto another). These carry the REMOTE_FILES_MIME type and are handled
+ *  as server-to-server copies rather than OS uploads. */
+function isRemoteFilesDrag(e: React.DragEvent): boolean {
+  return e.dataTransfer.types.includes(REMOTE_FILES_MIME);
+}
+
+export function SftpPanel({ paneId, paneState, sessionId }: Props) {
   const [cwd, setCwd] = useState('');
   const [draftPath, setDraftPath] = useState('');
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -479,6 +497,115 @@ export function SftpPanel({ paneId, paneState }: Props) {
     // currently-shown folder.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paneId, paneState, cwd]);
+
+  // ── Cross-pane drag-and-drop copy ─────────────────────────────────
+  // Each Remote Files panel is both a drag SOURCE (its rows are
+  // draggable) and a drop TARGET (another pane's selection can be dropped
+  // here to copy server-to-server). copyOver drives the "Copy here"
+  // overlay; the actual decision to accept uses the remoteDrag singleton
+  // since dataTransfer.getData() is unreadable during dragover.
+  const [copyOver, setCopyOver] = useState(false);
+  // Name of the folder row currently under a cross-pane drag (null = drop
+  // lands in the current folder). Drives the "Copy into …" overlay label.
+  const [copyTargetFolder, setCopyTargetFolder] = useState<string | null>(null);
+
+  // Resolve where a cross-pane drop lands: dropping onto a directory row
+  // copies INTO that folder; anywhere else (empty space, a file row, the
+  // ".." shortcut) copies into the current folder. Walks up from the event
+  // target to the FileTable row, which carries data-entry-name/-dir.
+  const resolveDropTarget = (e: React.DragEvent): { dir: string; folder: string | null } => {
+    let el = e.target as HTMLElement | null;
+    while (el && el !== e.currentTarget) {
+      const name = el.dataset?.entryName;
+      // Truthy (not just non-null) so an empty entry name can't become a
+      // malformed "cwd/" target — fall through to the current folder instead.
+      if (name) {
+        if (el.dataset.entryDir === '1' && name !== '..') {
+          return { dir: joinPath(cwd, name), folder: name };
+        }
+        return { dir: cwd, folder: null };
+      }
+      el = el.parentElement;
+    }
+    return { dir: cwd, folder: null };
+  };
+
+  // Begin a cross-pane drag from a row. If the row is part of the current
+  // selection, the whole selection travels; otherwise just that row (and
+  // it becomes the selection). ".." is never draggable.
+  const onRowDragStart = (e: React.DragEvent, entry: Entry) => {
+    if (!paneId || entry.name === '..') {
+      e.preventDefault();
+      return;
+    }
+    let names: string[];
+    if (selected.has(entry.name)) {
+      names = [...selected].filter((n) => n !== '..');
+    } else {
+      names = [entry.name];
+      setSelected(new Set([entry.name]));
+      setAnchor(entry.name);
+    }
+    if (names.length === 0) {
+      e.preventDefault();
+      return;
+    }
+    const desc: RemoteDrag = { paneId, sessionId: sessionId ?? '', cwd, names };
+    try {
+      e.dataTransfer.setData(REMOTE_FILES_MIME, JSON.stringify(desc));
+      e.dataTransfer.setData('text/plain', names.join('\n'));
+    } catch {
+      /* WebView2 can throw on setData mid-gesture; the singleton covers us */
+    }
+    e.dataTransfer.effectAllowed = 'copy';
+    setRemoteDrag(desc);
+  };
+
+  // Clear the drag singleton + overlay whenever any drag ends, so a
+  // cancelled drag (Esc / drop outside) doesn't leave stale state.
+  useEffect(() => {
+    const clear = () => {
+      setRemoteDrag(null);
+      setCopyOver(false);
+      setCopyTargetFolder(null);
+    };
+    document.addEventListener('dragend', clear);
+    return () => document.removeEventListener('dragend', clear);
+  }, []);
+
+  // Copy a dropped cross-pane selection into destDir (the current folder,
+  // or a folder row the user dropped onto). One SftpCopyRemote call per
+  // entry so the transfer strip shows a row per file — mirroring the
+  // download/upload flows — capped at 4 in flight (pkg/sftp multiplexes
+  // the rest over the shared SSH channel).
+  const doRemoteCopy = async (drag: RemoteDrag, destDir: string) => {
+    if (!paneId) return;
+    await runWithConcurrency(drag.names, 4, async (name) => {
+      try {
+        await SftpCopyRemote(drag.paneId, paneId!, drag.cwd, [name], destDir);
+      } catch (e) {
+        showErr(String(e));
+      }
+    });
+    await loadDir(cwd);
+  };
+
+  // Shared dragenter/dragover handling for a cross-pane Remote Files drag.
+  // Accepts the drop and shows the "copy" affordance unless it's a
+  // same-pane/session no-op (preventDefault only when droppable, so a
+  // rejected drag keeps the no-drop cursor and can't fire onDrop). Returns
+  // true when `e` is a remote-files drag, so the caller stops before the
+  // OS-upload / internal-rearrange paths.
+  const onRemoteFilesHover = (e: React.DragEvent): boolean => {
+    if (!isRemoteFilesDrag(e)) return false;
+    if (paneId && canDropRemoteDrag(getRemoteDrag(), paneId, sessionId)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      setCopyOver(true);
+      setCopyTargetFolder(resolveDropTarget(e).folder);
+    }
+    return true;
+  };
 
   const onMkdir = () =>
     openPrompt({
@@ -931,23 +1058,56 @@ export function SftpPanel({ paneId, paneState }: Props) {
 
       <div
         onDragEnter={(e) => {
-          // Internal panel/pane/session drags aren't file uploads — let them
-          // pass through to the pane's panel-rearrange handler instead of
-          // flashing the "Drop to upload" overlay.
+          // A cross-pane Remote Files drag is a server-to-server copy.
+          if (onRemoteFilesHover(e)) return;
+          // Other internal panel/pane/session drags aren't file uploads —
+          // let them pass through to the pane's panel-rearrange handler
+          // instead of flashing the "Drop to upload" overlay.
           if (isInternalDrag(e)) return;
           e.preventDefault();
           dragDepth.current += 1;
           setDragOver(true);
         }}
         onDragOver={(e) => {
+          if (onRemoteFilesHover(e)) return;
           if (isInternalDrag(e)) return;
           e.preventDefault();
         }}
-        onDragLeave={() => {
+        onDragLeave={(e) => {
+          // Clear the copy overlay only when the cursor truly leaves the
+          // listing bounds (dragleave also fires crossing child rows).
+          const r = e.currentTarget.getBoundingClientRect();
+          if (
+            e.clientX <= r.left ||
+            e.clientX >= r.right ||
+            e.clientY <= r.top ||
+            e.clientY >= r.bottom
+          ) {
+            setCopyOver(false);
+            setCopyTargetFolder(null);
+          }
           dragDepth.current = Math.max(0, dragDepth.current - 1);
           if (dragDepth.current === 0) setDragOver(false);
         }}
-        onDrop={() => {
+        onDrop={(e) => {
+          if (isRemoteFilesDrag(e)) {
+            e.preventDefault();
+            const { dir } = resolveDropTarget(e);
+            setCopyOver(false);
+            setCopyTargetFolder(null);
+            // Prefer the live singleton; fall back to the serialized payload.
+            let drag = getRemoteDrag();
+            if (!drag) {
+              try {
+                drag = JSON.parse(e.dataTransfer.getData(REMOTE_FILES_MIME)) as RemoteDrag;
+              } catch {
+                drag = null;
+              }
+            }
+            if (drag && canDropRemoteDrag(drag, paneId, sessionId)) void doRemoteCopy(drag, dir);
+            setRemoteDrag(null);
+            return;
+          }
           dragDepth.current = 0;
           setDragOver(false);
         }}
@@ -976,6 +1136,9 @@ export function SftpPanel({ paneId, paneState }: Props) {
         onRowDouble={onOpenEntry}
         onRowContext={onRowContext}
         onEmptyContext={onEmptyContext}
+        draggableRows
+        onRowDragStart={onRowDragStart}
+        dropHighlightName={copyOver ? copyTargetFolder : null}
         rowsContainerRef={rowsRef}
         rowTitle={(e) => (e.isSymlink && e.target ? `→ ${e.target}` : undefined)}
         emptyContent={
@@ -1051,7 +1214,11 @@ export function SftpPanel({ paneId, paneState }: Props) {
           return null;
         }}
       />
-        {dragOver && <FileDropOverlay />}
+        {dragOver && <FileDropOverlay label="Drop to upload" />}
+        {/* Over a folder row → the row itself is highlighted (FileTable's
+            dropHighlightName), so the panel-wide overlay is suppressed; it
+            shows only when the drop lands in the current folder. */}
+        {copyOver && !copyTargetFolder && <FileDropOverlay label="Copy here" />}
       </div>
 
       {/* Follow terminal folder toggle */}
@@ -1387,11 +1554,12 @@ function FileIcon({ entry, exec }: { entry: Entry; exec: boolean }) {
   );
 }
 
-// FileDropOverlay — the drag-over affordance shown while OS files are
-// being dragged onto the listing. Mirrors PaneGrid's center PaneDropOverlay
-// (blurred scrim + accent ring + centered pill) so file-drop reads the
-// same as the terminal's pane-merge drop.
-function FileDropOverlay() {
+// FileDropOverlay — the drag-over affordance shown while files are being
+// dragged onto the listing. `label` distinguishes an OS upload ("Drop to
+// upload") from a cross-pane copy ("Copy here"). Mirrors PaneGrid's center
+// PaneDropOverlay (blurred scrim + accent ring + centered pill) so file-drop
+// reads the same as the terminal's pane-merge drop.
+function FileDropOverlay({ label }: { label: string }) {
   return (
     <div
       style={{
@@ -1433,7 +1601,7 @@ function FileDropOverlay() {
           whiteSpace: 'nowrap',
         }}
       >
-        Drop to upload
+        {label}
       </div>
     </div>
   );

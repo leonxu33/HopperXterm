@@ -272,6 +272,152 @@ func (p *Pane) SftpUpload(localPath, remotePath string) (uint64, error) {
 		})
 }
 
+// SftpRelayFrom copies the named entries from another pane's file client
+// (srcDir on `src`) into this pane's dstDir — a server-to-server transfer
+// driven by a cross-pane drag-and-drop. Files stream directly when both
+// ends support it (transport.CopyRemoteFile), with a temp-file fallback;
+// directories recurse. Each call is ONE transfer on this (the destination)
+// pane, so progress + cancel land in the pane the user dropped onto, with
+// bytes reported cumulatively across every entry in `names`. The frontend
+// drives one call per dropped entry (so each gets its own transfer row),
+// but the cumulative `base` accounting also makes a multi-name batch
+// report correctly if called that way.
+func (p *Pane) SftpRelayFrom(src transport.FileClient, srcDir string, names []string, dstDir string) (uint64, error) {
+	dst, err := p.fileClient()
+	if err != nil {
+		return 0, err
+	}
+
+	// Pre-walk the source to seed TotalBytes (best-effort; a failed
+	// sub-listing just under-counts, like SftpDownloadDir).
+	var total int64
+	for _, n := range names {
+		total += relaySize(src, joinRemote(srcDir, n))
+	}
+
+	// Label the transfer with the first destination path so the panel's
+	// "done → refresh if parentDir == cwd" heuristic still fires; the
+	// frontend also refreshes explicitly after the await.
+	label := dstDir
+	if len(names) > 0 {
+		label = joinRemote(dstDir, names[0])
+	}
+
+	return p.runTransfer("download", label, total,
+		func(progress transport.ProgressFunc, cancel <-chan struct{}) (int64, error) {
+			var base int64
+			for _, n := range names {
+				if isSkippableEntry(n) {
+					continue
+				}
+				written, err := copyEntry(
+					src, joinRemote(srcDir, n),
+					dst, joinRemote(dstDir, n),
+					base, progress, cancel,
+				)
+				base += written
+				if err != nil {
+					return base, err
+				}
+			}
+			return base, nil
+		})
+}
+
+// copyEntry copies one entry (file or directory tree) from src to dst.
+// `base` is the byte count already reported by earlier entries in the
+// batch, so progress stays cumulative across the whole drop. Returns the
+// bytes copied for this entry.
+func copyEntry(
+	src transport.FileClient, srcPath string,
+	dst transport.FileClient, dstPath string,
+	base int64, progress transport.ProgressFunc, cancel <-chan struct{},
+) (int64, error) {
+	st, err := src.Stat(srcPath)
+	if err != nil {
+		return 0, err
+	}
+	if !st.IsDir {
+		// Offset this file's 0..size progress by the running base.
+		fileProgress := func(written int64) error {
+			if progress == nil {
+				return nil
+			}
+			return progress(base + written)
+		}
+		return transport.CopyRemoteFile(src, srcPath, dst, dstPath, fileProgress, cancel)
+	}
+
+	// Directory: create it on the destination, then recurse. The remote
+	// path is always POSIX (joinRemote), matching the rest of the SFTP layer.
+	if err := dst.Mkdir(dstPath, true); err != nil {
+		return 0, err
+	}
+	entries, err := src.List(srcPath)
+	if err != nil {
+		return 0, err
+	}
+	var sub int64
+	for _, e := range entries {
+		if isSkippableEntry(e.Name) {
+			continue
+		}
+		written, err := copyEntry(
+			src, joinRemote(srcPath, e.Name),
+			dst, joinRemote(dstPath, e.Name),
+			base+sub, progress, cancel,
+		)
+		sub += written
+		if err != nil {
+			return sub, err
+		}
+	}
+	return sub, nil
+}
+
+// relaySize returns the total byte size of a remote path (recursing into
+// directories). Best-effort: a stat/list failure contributes 0 so the
+// progress denominator just under-counts rather than erroring the copy.
+func relaySize(c transport.FileClient, path string) int64 {
+	st, err := c.Stat(path)
+	if err != nil {
+		return 0
+	}
+	if !st.IsDir {
+		return st.Size
+	}
+	entries, err := c.List(path)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, e := range entries {
+		if isSkippableEntry(e.Name) {
+			continue
+		}
+		total += relaySize(c, joinRemote(path, e.Name))
+	}
+	return total
+}
+
+// isSkippableEntry is true for the listing pseudo-entries ("." / "..") and
+// the empty name — none of which should be copied or counted.
+func isSkippableEntry(name string) bool {
+	return name == "" || name == "." || name == ".."
+}
+
+// joinRemote joins a POSIX remote directory and a name. Remote file paths
+// are always '/'-separated regardless of the local OS.
+func joinRemote(dir, name string) string {
+	if dir == "" {
+		return name
+	}
+	if dir[len(dir)-1] == '/' {
+		return dir + name
+	}
+	return dir + "/" + name
+}
+
 // progressThrottle emits sftp:transfer events at most ~10 Hz to avoid
 // drowning the IPC channel on fast copies.
 type progressThrottle struct {

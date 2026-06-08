@@ -2570,6 +2570,7 @@ function App() {
                                 <SftpPanel
                                   paneId={cell.id}
                                   paneState={paneStates[cell.id] || null}
+                                  sessionId={cell.sessionId}
                                 />
                               );
                             }

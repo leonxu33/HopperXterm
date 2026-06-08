@@ -48,6 +48,110 @@ type FileClient interface {
 	Close() error
 }
 
+// RemoteReadable / RemoteWritable are OPTIONAL capabilities a FileClient
+// may implement to support direct server-to-server streaming (no local
+// temp file) during a cross-pane copy. CopyRemoteFile streams when the
+// source satisfies RemoteReadable and the destination satisfies
+// RemoteWritable; otherwise it falls back to download-to-temp → upload.
+// Only *SFTP implements these today — FTP/S3/SCP/local take the fallback.
+type RemoteReadable interface {
+	OpenRemote(p string) (io.ReadCloser, error)
+}
+type RemoteWritable interface {
+	CreateRemote(p string) (io.WriteCloser, error)
+}
+
+// OpenRemote opens a remote file for reading (RemoteReadable).
+func (s *SFTP) OpenRemote(p string) (io.ReadCloser, error) { return s.c.Open(p) }
+
+// CreateRemote creates/truncates a remote file for writing (RemoteWritable).
+func (s *SFTP) CreateRemote(p string) (io.WriteCloser, error) { return s.c.Create(p) }
+
+// CopyRemoteFile copies a single file from src:srcPath to dst:dstPath.
+// When both ends support streaming (RemoteReadable / RemoteWritable) the
+// bytes flow directly through this process — one pass, no disk. Otherwise
+// it falls back to a local temp file (download then upload), which works
+// for any FileClient pair (e.g. SFTP↔S3). progress reports cumulative
+// bytes for this one file; cancel aborts mid-flight. Returns bytes copied.
+func CopyRemoteFile(src FileClient, srcPath string, dst FileClient, dstPath string, progress ProgressFunc, cancel <-chan struct{}) (int64, error) {
+	rd, rok := src.(RemoteReadable)
+	wr, wok := dst.(RemoteWritable)
+	if rok && wok {
+		rc, err := rd.OpenRemote(srcPath)
+		if err != nil {
+			return 0, fmt.Errorf("open remote %s: %w", srcPath, err)
+		}
+		defer rc.Close()
+		wc, err := wr.CreateRemote(dstPath)
+		if err != nil {
+			return 0, fmt.Errorf("create remote %s: %w", dstPath, err)
+		}
+		stopWatch := watchCancel(cancel, rc, wc)
+		defer stopWatch()
+
+		// Bridge the source→here and here→dest hops with an in-memory pipe
+		// so BOTH halves pipeline at once: a producer goroutine drives
+		// rc.WriteTo (pkg/sftp's concurrent-read path) into the pipe, while
+		// this goroutine drives wc.ReadFrom (the concurrent-write path) out
+		// of it. A single io.Copy(wc, rc) would only pipeline one side —
+		// the other would go packet-by-packet, RTT-bound and slow against a
+		// distant host. io.Copy picks WriteTo/ReadFrom via type assertion, so
+		// the wrappers are arranged to leave those fast paths selectable:
+		// the dest copy reads through a progress-counting reader (no
+		// WriterTo) so wc.ReadFrom still wins.
+		pr, pw := io.Pipe()
+		go func() {
+			_, rerr := io.Copy(pw, rc) // rc.WriteTo(pw): concurrent reads
+			_ = pw.CloseWithError(rerr)
+		}()
+		counted := &progressReaderWrap{r: pr, progress: progress}
+		n, copyErr := io.Copy(wc, counted) // wc.ReadFrom(counted): concurrent writes
+		// Unblock the producer if the dest side bailed early, then flush +
+		// surface a late write error a deferred close would swallow.
+		_ = pr.CloseWithError(copyErr)
+		closeErr := wc.Close()
+		if copyErr != nil {
+			return n, copyErr
+		}
+		return n, closeErr
+	}
+
+	// Fallback: relay through a local temp file (download fully, then
+	// upload). Progress is split 50/50 across the two phases and mapped
+	// into the file's size band so the bar advances smoothly the whole
+	// time — download fills 0→50%, upload 50→100%. Reporting only the
+	// upload phase (as before) left the bar frozen at 0% for the entire
+	// download of a large file. The slight under-count of "bytes moved"
+	// (a relay actually moves 2× the file size over the wire) is the
+	// trade for a normal-looking 0→100% against the real size; the "done"
+	// event lands it exactly on the total regardless.
+	tmp, err := os.CreateTemp("", "hopper-relay-*")
+	if err != nil {
+		return 0, fmt.Errorf("relay temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	dlProgress := func(w int64) error {
+		if progress == nil {
+			return nil
+		}
+		return progress(w / 2)
+	}
+	dlSize, err := src.Download(srcPath, tmpPath, dlProgress, cancel)
+	if err != nil {
+		return 0, err
+	}
+	ulProgress := func(w int64) error {
+		if progress == nil {
+			return nil
+		}
+		return progress(dlSize/2 + w/2)
+	}
+	return dst.Upload(tmpPath, dstPath, ulProgress, cancel)
+}
+
 // SFTP wraps an SFTP subsystem on top of an SSH client. The client is
 // shared with the terminal Shell — opening an SFTP session is a separate
 // SSH channel, not a separate TCP connection.

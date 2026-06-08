@@ -133,6 +133,9 @@ export type FileTableProps<K extends string> = {
   onRowDragStart?: (e: React.DragEvent, entry: Entry) => void;
   onRowDrop?: (e: React.DragEvent, target: Entry | null) => void;
   onContainerDrop?: (e: React.DragEvent) => void;
+  // Name of the row to render as the active drop target (an accent ring),
+  // e.g. the folder a cross-pane file drag is hovering. null = none.
+  dropHighlightName?: string | null;
 };
 
 export function FileTable<K extends string>({
@@ -157,6 +160,7 @@ export function FileTable<K extends string>({
   onRowDragStart,
   onRowDrop,
   onContainerDrop,
+  dropHighlightName,
 }: FileTableProps<K>) {
   const [colWidths, setColWidths] = useState<Record<string, number>>(() => {
     const init: Record<string, number> = {};
@@ -374,6 +378,7 @@ export function FileTable<K extends string>({
       >
         {rows.map((r, i) => {
           const active = sel.has(r.name);
+          const isDrop = dropHighlightName != null && dropHighlightName === r.name;
           return (
             <div
               key={`${r.name}-${i}`}
@@ -382,6 +387,10 @@ export function FileTable<K extends string>({
               onDoubleClick={() => onRowDouble(r)}
               onContextMenu={onRowContext ? (e) => onRowContext(e, r.name) : undefined}
               data-tip={(rowTitle ? rowTitle(r) : undefined) || undefined}
+              // Identify the row for drag-drop hit-testing (a drop handler on
+              // an ancestor walks up from e.target to find these).
+              data-entry-name={r.name}
+              data-entry-dir={r.isDir ? '1' : undefined}
               draggable={draggableRows || undefined}
               onDragStart={onRowDragStart ? (e) => onRowDragStart(e, r) : undefined}
               onDragOver={onRowDrop ? (e) => e.preventDefault() : undefined}
@@ -394,17 +403,25 @@ export function FileTable<K extends string>({
                 cursor: 'pointer',
                 width: totalWidth,
                 minWidth: '100%',
-                background: active ? `linear-gradient(90deg, ${TOKENS.accentDim}, transparent)` : 'transparent',
-                boxShadow: active ? `inset 0 0 0 1px ${TOKENS.accentSoft}` : 'none',
-                color: active ? TOKENS.fg : 'rgba(245,247,250,0.86)',
+                background: isDrop
+                  ? TOKENS.accentDim
+                  : active
+                    ? `linear-gradient(90deg, ${TOKENS.accentDim}, transparent)`
+                    : 'transparent',
+                boxShadow: isDrop
+                  ? `inset 0 0 0 1.5px ${TOKENS.accent}`
+                  : active
+                    ? `inset 0 0 0 1px ${TOKENS.accentSoft}`
+                    : 'none',
+                color: active || isDrop ? TOKENS.fg : 'rgba(245,247,250,0.86)',
                 font: `${FS.lg}px/1.2 ${TOKENS.font}`,
                 userSelect: 'none',
               }}
               onMouseEnter={(e) => {
-                if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.035)';
+                if (!active && !isDrop) e.currentTarget.style.background = 'rgba(255,255,255,0.035)';
               }}
               onMouseLeave={(e) => {
-                if (!active) e.currentTarget.style.background = 'transparent';
+                if (!active && !isDrop) e.currentTarget.style.background = 'transparent';
               }}
             >
               {cols.map((col, ci) => (

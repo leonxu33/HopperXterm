@@ -265,6 +265,30 @@ func (m *Manager) SftpUpload(paneID, local, remote string) (uint64, error) {
 	return p.SftpUpload(local, remote)
 }
 
+// SftpCopyRemote copies the named entries from srcDir on the source pane
+// into dstDir on the destination pane — a server-to-server transfer for
+// cross-pane drag-and-drop. The transfer (progress + cancel) is owned by
+// the destination pane. Rejects a same-pane copy; the frontend also
+// blocks same-session drops, so this is a defensive backstop.
+func (m *Manager) SftpCopyRemote(srcPaneID, dstPaneID, srcDir string, names []string, dstDir string) (uint64, error) {
+	if srcPaneID == dstPaneID {
+		return 0, errors.New("pane: cannot copy to the same pane")
+	}
+	srcP, ok := m.get(srcPaneID)
+	if !ok {
+		return 0, errors.New("pane: source not found")
+	}
+	dstP, ok := m.get(dstPaneID)
+	if !ok {
+		return 0, errors.New("pane: destination not found")
+	}
+	srcClient, err := srcP.fileClient()
+	if err != nil {
+		return 0, err
+	}
+	return dstP.SftpRelayFrom(srcClient, srcDir, names, dstDir)
+}
+
 // StartResourceMonitor begins streaming resource:sample events for the pane.
 func (m *Manager) StartResourceMonitor(paneID string) error {
 	p, ok := m.get(paneID)
