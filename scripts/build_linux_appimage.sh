@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Linux installer (.AppImage) for HopperXterm.
+# Build the Linux AppImage for HopperXterm.
 #
 # Runs ON the Linux box. Builds the binary first (scripts/build_linux.sh),
 # then assembles a standard AppDir and packs it with appimagetool — a single
@@ -14,9 +14,9 @@
 # Output: app/build/bin/linux/HopperXterm-<version>-linux-<arch>.AppImage
 #   (<version> = info.productVersion from app/wails.json)
 #
-# Usage:  scripts/build_linux_installer.sh [--skip-build]
+# Usage:  scripts/build_linux_appimage.sh [--skip-build]
 #   --skip-build  reuse an existing app/build/bin/linux/HopperXterm
-# (Normally invoked from Windows via scripts/build_linux_remote.ps1 -Installer.)
+# (Normally invoked from Windows via scripts/build_linux_remote.ps1 -AppImage.)
 
 set -euo pipefail
 
@@ -25,7 +25,7 @@ APP_DIR="$REPO_ROOT/app"
 LINUX_DIR="$APP_DIR/build/bin/linux"
 BIN="$LINUX_DIR/HopperXterm"
 
-log() { printf '\033[1;36m[build_linux_installer]\033[0m %s\n' "$*"; }
+log() { printf '\033[1;36m[build_linux_appimage]\033[0m %s\n' "$*"; }
 
 # appimagetool needs the runtime arch slug; map it from the host CPU. PKG_ARCH
 # is the asset-name slug — "aarch64" for arm64 so it can't be misread as amd64.

@@ -48,6 +48,30 @@ func TestPlatformAssetSuffix(t *testing.T) {
 	}
 }
 
+func TestClassifyLinuxInstall(t *testing.T) {
+	cases := []struct {
+		name              string
+		appImage, exePath string
+		wantCanSelf       bool
+		wantPackaged      bool
+	}{
+		{"appimage", "/home/u/Apps/HopperXterm.AppImage", "/tmp/.mount_xx/usr/bin/HopperXterm", true, false},
+		{"appimage wins over /usr path", "/home/u/HopperXterm.AppImage", "/usr/bin/HopperXterm", true, false},
+		{"deb under /usr", "", "/usr/bin/HopperXterm", false, true},
+		{"opt install", "", "/opt/hopperxterm/HopperXterm", false, true},
+		{"bare binary in home", "", "/home/u/build/HopperXterm", false, false},
+		{"bare binary in /tmp", "", "/tmp/HopperXterm", false, false},
+		{"blank appimage env treated as unset", "   ", "/home/u/HopperXterm", false, false},
+	}
+	for _, c := range cases {
+		gotSelf, gotPkg := classifyLinuxInstall(c.appImage, c.exePath)
+		if gotSelf != c.wantCanSelf || gotPkg != c.wantPackaged {
+			t.Errorf("classifyLinuxInstall(%q, %q) = (%v, %v), want (%v, %v)",
+				c.appImage, c.exePath, gotSelf, gotPkg, c.wantCanSelf, c.wantPackaged)
+		}
+	}
+}
+
 func TestPickPlatformAsset(t *testing.T) {
 	assets := []ghAsset{
 		{Name: "HopperXterm-1.2.0-windows-amd64.exe", BrowserDownloadURL: "u-win"},

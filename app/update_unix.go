@@ -19,6 +19,22 @@ import (
 // stays put — this const is only acted on when the launch actually succeeds.
 const quitAfterInstall = true
 
+// selfUpdateContext classifies how this running build can be updated, so
+// CheckForUpdates can avoid offering an in-app install that would fail. The
+// actual decision lives in the pure classifyLinuxInstall (update.go) so it's
+// testable; here we just gather the inputs ($APPIMAGE + the resolved exe path)
+// and short-circuit the non-Linux unix-likes, which have no in-place updater.
+func selfUpdateContext() (canSelfUpdate, packaged bool) {
+	if runtime.GOOS != "linux" {
+		return false, false
+	}
+	exe, _ := os.Executable()
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return classifyLinuxInstall(os.Getenv("APPIMAGE"), exe)
+}
+
 // launchUpdateInstaller performs an automatic in-place update on Linux when the
 // app is running as an AppImage — the same end-to-end experience as Windows and
 // macOS (quit → replace → relaunch).

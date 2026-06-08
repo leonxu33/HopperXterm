@@ -10,7 +10,7 @@
 # Removing the user-local toolchain is just `rm -rf ~/toolchain ~/go`.
 #
 # Output: app/build/bin/linux/HopperXterm  (plain binary; for a distributable
-# AppImage use scripts/build_linux_installer.sh instead).
+# AppImage use scripts/build_linux_appimage.sh instead).
 #
 # Usage:  scripts/build_linux.sh
 # (Normally invoked from Windows via scripts/build_linux_remote.ps1.)

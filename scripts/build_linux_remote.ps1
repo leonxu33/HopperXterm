@@ -2,14 +2,15 @@
 # over SSH (key auth - no password stored here).
 #
 #   scripts\build_linux_remote.ps1              -> HopperXterm  (binary, zipped? no - raw)
-#   scripts\build_linux_remote.ps1 -Installer    -> HopperXterm-<ver>-linux-<arch>.AppImage
+#   scripts\build_linux_remote.ps1 -AppImage     -> HopperXterm-<ver>-linux-<arch>.AppImage
+#   scripts\build_linux_remote.ps1 -Packages     -> hopperxterm_<ver>_<arch>.deb + .rpm
 #   scripts\build_linux_remote.ps1 -RemoteHost user@other-box
 #
 # What it does:
 #   1. Tars the working tree (git-tracked + untracked-but-not-ignored files,
 #      so node_modules / build outputs never cross the wire)
 #   2. Pushes it to the box at ~/build/hopperxterm-src (wiped each run)
-#   3. Runs scripts/build_linux.sh (or build_linux_installer.sh) there -
+#   3. Runs scripts/build_linux.sh (or build_linux_appimage.sh) there -
 #      that script self-provisions Go/Node/Wails + the gtk3/webkit2gtk dev
 #      packages (the deps step needs passwordless sudo on the box)
 #   4. Copies the artifact back to app\build\bin\linux\
@@ -18,9 +19,12 @@
 # public key in the box user's ~/.ssh/authorized_keys.
 
 param(
-    [switch]$Installer,
+    [switch]$AppImage,
+    [switch]$Packages,
     [string]$RemoteHost = "user@your-linux-box"
 )
+
+if ($AppImage -and $Packages) { Write-Host "ERROR: use only one of -AppImage / -Packages" -ForegroundColor Red; exit 1 }
 
 $ErrorActionPreference = "Stop"
 $RepoRoot  = Split-Path $PSScriptRoot
@@ -46,17 +50,23 @@ ssh -o BatchMode=yes $RemoteHost "rm -rf ~/$RemoteDir; mkdir -p ~/$RemoteDir; ta
 if ($LASTEXITCODE -ne 0) { Fail "remote extract failed" }
 
 # --- 3. build remotely -------------------------------------------------------
-$script = if ($Installer) { "build_linux_installer.sh" } else { "build_linux.sh" }
+$script = if ($AppImage) { "build_linux_appimage.sh" } elseif ($Packages) { "build_linux_packages.sh" } else { "build_linux.sh" }
 Write-Host ">> Running $script on the box (first run provisions the toolchain - may take a while)..." -ForegroundColor Cyan
 ssh -o BatchMode=yes $RemoteHost "cd ~/$RemoteDir; bash scripts/$script"
 if ($LASTEXITCODE -ne 0) { Fail "remote build failed" }
 
 # --- 4. fetch the artifact ---------------------------------------------------
 New-Item -ItemType Directory -Force $OutDir | Out-Null
-if ($Installer) {
+if ($AppImage) {
     Write-Host ">> Fetching AppImage..." -ForegroundColor Cyan
     scp -o BatchMode=yes -q "${RemoteHost}:~/$RemoteDir/app/build/bin/linux/HopperXterm-*-linux-*.AppImage" $OutDir
     if ($LASTEXITCODE -ne 0) { Fail "fetching AppImage failed" }
+} elseif ($Packages) {
+    Write-Host ">> Fetching .deb + .rpm..." -ForegroundColor Cyan
+    scp -o BatchMode=yes -q "${RemoteHost}:~/$RemoteDir/app/build/bin/linux/hopperxterm_*.deb" $OutDir
+    if ($LASTEXITCODE -ne 0) { Fail "fetching .deb failed" }
+    scp -o BatchMode=yes -q "${RemoteHost}:~/$RemoteDir/app/build/bin/linux/hopperxterm-*.rpm" $OutDir
+    if ($LASTEXITCODE -ne 0) { Fail "fetching .rpm failed" }
 } else {
     Write-Host ">> Fetching binary..." -ForegroundColor Cyan
     scp -o BatchMode=yes -q "${RemoteHost}:~/$RemoteDir/app/build/bin/linux/HopperXterm" $OutDir

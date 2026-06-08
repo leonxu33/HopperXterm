@@ -59,6 +59,16 @@ type UpdateInfo struct {
 	AssetName string `json:"assetName"`
 	AssetURL  string `json:"assetUrl"`
 	AssetSize int64  `json:"assetSize"`
+	// CanSelfUpdate is true when this running build can apply the platform asset
+	// in place (always on Windows/macOS; on Linux only when launched from an
+	// AppImage). When false, Available is forced false and the frontend routes
+	// to manual download even though HasAsset may be true.
+	CanSelfUpdate bool `json:"canSelfUpdate"`
+	// Packaged is true for a Linux system-package install (.deb/.rpm, binary
+	// under a system prefix like /usr or /opt). Updates there belong to the OS
+	// package manager, so the frontend tailors the message to "update via
+	// apt/dnf" rather than a generic manual download.
+	Packaged bool `json:"packaged"`
 }
 
 // ghRelease is the slice of GitHub's release JSON we consume.
@@ -109,11 +119,15 @@ func (a *App) CheckForUpdates() (*UpdateInfo, error) {
 		info.AssetSize = asset.Size
 	}
 
-	// "Available" requires both a newer version and an installable asset; a
-	// newer release with no asset for this platform still surfaces (via
-	// Newer + ReleaseURL) but the frontend routes to manual download.
+	info.CanSelfUpdate, info.Packaged = selfUpdateContext()
+
+	// "Available" requires a newer version, an installable asset for this
+	// platform, AND a build that can apply it in place. A packaged (.deb/.rpm)
+	// or bare-binary Linux install has the AppImage asset but can't self-apply,
+	// so it still surfaces (via Newer + ReleaseURL) while the frontend routes to
+	// the package manager / manual download instead of a failing in-app install.
 	info.Newer = isNewerVersion(info.LatestVersion, cur)
-	info.Available = info.Newer && info.HasAsset
+	info.Available = info.Newer && info.HasAsset && info.CanSelfUpdate
 
 	return info, nil
 }
@@ -206,7 +220,7 @@ func platformAssetSuffix(goos, goarch string) string {
 	case "darwin":
 		return "-macos-universal.dmg"
 	case "linux":
-		// Arch-specific AppImage (see scripts/build_linux_installer.sh). Use the
+		// Arch-specific AppImage (see scripts/build_linux_appimage.sh). Use the
 		// "aarch64" slug for arm64 so it can't be misread as "amd64". The
 		// in-place apply only works when running FROM an AppImage (the helper
 		// replaces $APPIMAGE); a bare-binary build that downloads this will get
@@ -219,6 +233,23 @@ func platformAssetSuffix(goos, goarch string) string {
 	default:
 		return "" // no packaged installer for this platform
 	}
+}
+
+// classifyLinuxInstall decides, for a Linux build, whether an update can be
+// applied in place and whether this is a system-package install — from the
+// $APPIMAGE value and the resolved executable path. Pure + injectable so it's
+// unit-testable without depending on the test host (mirrors platformAssetSuffix):
+//   - $APPIMAGE set            -> can self-update (the AppImage swaps in place)
+//   - exe under /usr or /opt   -> packaged (.deb/.rpm); apt/dnf owns updates
+//   - anything else            -> bare binary; manual release download
+func classifyLinuxInstall(appImage, exePath string) (canSelfUpdate, packaged bool) {
+	if strings.TrimSpace(appImage) != "" {
+		return true, false
+	}
+	if strings.HasPrefix(exePath, "/usr/") || strings.HasPrefix(exePath, "/opt/") {
+		return false, true
+	}
+	return false, false
 }
 
 // pickPlatformAsset returns the installer asset matching the running OS/arch

@@ -16,6 +16,11 @@ import (
 // helper below is spawned.
 const quitAfterInstall = true
 
+// selfUpdateContext: the macOS updater always replaces the .app bundle in
+// place, and there's no system-package concept here. (Twin of the unix/windows
+// versions — see update_unix.go for the Linux classification.)
+func selfUpdateContext() (canSelfUpdate, packaged bool) { return true, false }
+
 // launchUpdateInstaller performs an automatic in-place update on macOS — the
 // same end-to-end experience as Windows (quit → replace → relaunch), rather
 // than the old "open the .dmg and make the user drag it" flow (which failed

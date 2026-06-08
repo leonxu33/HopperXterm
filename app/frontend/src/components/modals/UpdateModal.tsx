@@ -1,10 +1,12 @@
 // UpdateModal — Settings → Check for updates. Queries the backend
 // CheckForUpdates() (GitHub Releases) on open and shows one of: checking /
 // up-to-date / update available / dev build / error. When an update is
-// available with an installer for this platform, the user can download + apply
-// it in place — all three desktop OSes then quit and relaunch: Windows runs the
-// NSIS installer silently, macOS replaces the .app bundle, Linux replaces the
-// running .AppImage.
+// available with an installer for this platform AND this build can apply it in
+// place, the user can download + install it — all three desktop OSes then quit
+// and relaunch: Windows runs the NSIS installer silently, macOS replaces the
+// .app bundle, Linux replaces the running .AppImage. A Linux .deb/.rpm install
+// (info.packaged) or bare binary can't self-apply, so it's routed to the
+// package manager / manual download instead of a failing Install button.
 // "View release" (opens the latest GitHub release page) is offered in every
 // non-dev result — including up-to-date — so the user can always read the notes
 // or grab assets manually.
@@ -185,6 +187,18 @@ export function UpdateModal({ onClose }: { onClose: () => void }) {
           {!info.hasAsset && (
             <div style={{ color: TOKENS.warn, font: `${FS.base}px/1.5 ${TOKENS.font}` }}>
               No installer is published for this platform — open the release page to download it manually.
+            </div>
+          )}
+          {info.hasAsset && info.packaged && (
+            <div style={{ color: TOKENS.fgDim, font: `${FS.base}px/1.5 ${TOKENS.font}` }}>
+              HopperXterm was installed through your system package manager. Update it from there (e.g. apt or
+              dnf), or open the release page to download the new package.
+            </div>
+          )}
+          {info.hasAsset && !info.packaged && !info.canSelfUpdate && (
+            <div style={{ color: TOKENS.warn, font: `${FS.base}px/1.5 ${TOKENS.font}` }}>
+              Automatic update isn’t available for this build — open the release page to download the new version
+              manually.
             </div>
           )}
           {info.releaseNotes?.trim() && (

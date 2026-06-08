@@ -116,10 +116,13 @@ Substitute the `4.0`/`3` package variant if your distro doesn't have 4.1.
 | Command | What it does |
 | --- | --- |
 | `scripts/build_linux.sh` | Local build: binary → `app/build/bin/linux/HopperXterm` |
-| `scripts/build_linux_installer.sh` | Release: AppImage → `app/build/bin/linux/HopperXterm-<ver>-linux-<arch>.AppImage` |
+| `scripts/build_linux_appimage.sh` | Portable AppImage → `app/build/bin/linux/HopperXterm-<ver>-linux-<arch>.AppImage` |
+| `scripts/build_linux_packages.sh` | Installers: `.deb` + `.rpm` → `app/build/bin/linux/hopperxterm_<ver>_<arch>.deb` and `hopperxterm-<ver>.<arch>.rpm` |
 
-The AppImage bundles only the binary, not gtk3/webkit2gtk — those must be
-present on the target machine.
+The AppImage bundles only the binary, not gtk3/webkit2gtk — those must already be
+present on the target machine. The `.deb`/`.rpm` packages instead **declare**
+gtk3/webkit2gtk as dependencies, so the package manager installs them
+automatically and the app registers in the desktop menu.
 
 ## Testing
 

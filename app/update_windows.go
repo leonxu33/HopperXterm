@@ -16,6 +16,11 @@ import (
 // shortly after launchUpdateInstaller registers + triggers the update task.
 const quitAfterInstall = true
 
+// selfUpdateContext: the Windows NSIS installer always applies in place, and
+// there's no system-package concept here. (Twin of the unix/darwin versions —
+// see update_unix.go for the Linux classification that motivates this.)
+func selfUpdateContext() (canSelfUpdate, packaged bool) { return true, false }
+
 const flagCreateNoWindow = 0x08000000
 
 const updateTaskName = "HopperXtermSelfUpdate"
