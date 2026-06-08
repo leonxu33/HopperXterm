@@ -218,7 +218,7 @@ func (f *FTP) Rename(src, dst string) error {
 }
 
 // Download streams remotePath into localPath.
-func (f *FTP) Download(remotePath, localPath string, progress ProgressFunc, _ <-chan struct{}) (int64, error) {
+func (f *FTP) Download(remotePath, localPath string, progress ProgressFunc, cancel <-chan struct{}) (int64, error) {
 	if f.c == nil {
 		return 0, errors.New("ftp: not connected")
 	}
@@ -231,6 +231,12 @@ func (f *FTP) Download(remotePath, localPath string, progress ProgressFunc, _ <-
 	if err != nil {
 		return 0, fmt.Errorf("create local %s: %w", localPath, err)
 	}
+	// Cancel closes the data connection, unblocking a read stalled on a
+	// dead network (the progress callback alone can't — a stuck read never
+	// ticks). It closes only the remote socket, not the local file, so
+	// there's no race with the os.Remove cleanup below.
+	stop := watchCancel(cancel, voidCloser(f.c.AbortData))
+	defer stop()
 	n, cerr := copyWithProgress(dst, r, progress)
 	_ = dst.Close() // close before any unlink — Windows won't remove an open file
 	if cerr != nil {
@@ -260,7 +266,7 @@ func (f *FTP) DownloadDir(remoteDir, localDir string, progress ProgressFunc, _ <
 	return 0, errors.New("ftp: recursive directory download not yet supported")
 }
 
-func (f *FTP) Upload(localPath, remotePath string, progress ProgressFunc, _ <-chan struct{}) (int64, error) {
+func (f *FTP) Upload(localPath, remotePath string, progress ProgressFunc, cancel <-chan struct{}) (int64, error) {
 	if f.c == nil {
 		return 0, errors.New("ftp: not connected")
 	}
@@ -269,6 +275,10 @@ func (f *FTP) Upload(localPath, remotePath string, progress ProgressFunc, _ <-ch
 		return 0, fmt.Errorf("open local %s: %w", localPath, err)
 	}
 	defer src.Close()
+	// Cancel closes the data connection so a Stor stalled on a dead network
+	// write returns instead of hanging until the TCP timeout.
+	stop := watchCancel(cancel, voidCloser(f.c.AbortData))
+	defer stop()
 	// Stor consumes a reader directly; wrap it in a pipe so we can report
 	// progress between read chunks.
 	pr, pw := io.Pipe()

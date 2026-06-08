@@ -77,6 +77,30 @@ type Conn struct {
 
 	skipEPSV     bool // EPSV unsupported → go straight to PASV
 	preferActive bool // a passive data dial failed → use active mode
+
+	// dataMu guards xfer, the in-flight transfer's data connection. Retr
+	// and Stor hold mu for the whole transfer, so AbortData uses this
+	// separate lock to tear the data conn down from another goroutine
+	// (transfer cancellation) and unblock a stalled read/write.
+	dataMu sync.Mutex
+	xfer   net.Conn
+}
+
+func (c *Conn) setXfer(nc net.Conn) { c.dataMu.Lock(); c.xfer = nc; c.dataMu.Unlock() }
+func (c *Conn) clearXfer()          { c.dataMu.Lock(); c.xfer = nil; c.dataMu.Unlock() }
+
+// AbortData closes the in-flight transfer's data connection, if any,
+// unblocking a Retr/Stor stalled on a slow or dead network. Safe to call
+// from a goroutine other than the one running the transfer; a no-op when
+// no transfer is active. The transfer's own Close/finishTransfer path then
+// runs normally and surfaces the resulting error.
+func (c *Conn) AbortData() {
+	c.dataMu.Lock()
+	nc := c.xfer
+	c.dataMu.Unlock()
+	if nc != nil {
+		_ = nc.Close()
+	}
 }
 
 // Dial opens a control connection and reads the server greeting.
@@ -227,6 +251,7 @@ func (c *Conn) Retr(remotePath string) (io.ReadCloser, error) {
 		c.mu.Unlock()
 		return nil, err
 	}
+	c.setXfer(conn) // expose the data conn so AbortData can cancel a stalled read
 	return &retrReader{conn: conn, c: c}, nil
 }
 
@@ -238,6 +263,8 @@ func (c *Conn) Stor(remotePath string, r io.Reader) error {
 	if err != nil {
 		return err
 	}
+	c.setXfer(conn) // expose the data conn so AbortData can cancel a stalled write
+	defer c.clearXfer()
 	_, copyErr := io.Copy(conn, r)
 	conn.Close()
 	_, _, ferr := c.finishTransfer()
@@ -554,6 +581,7 @@ func (r *retrReader) Close() error {
 		return nil
 	}
 	r.closed = true
+	r.c.clearXfer()
 	cerr := r.conn.Close()
 	_, _, ferr := r.c.finishTransfer()
 	r.c.mu.Unlock()

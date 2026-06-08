@@ -8,6 +8,28 @@ import (
 	"time"
 )
 
+// AbortData tears down the in-flight transfer's data connection so a
+// Retr/Stor stalled on a dead network unblocks instead of hanging. It must
+// be a no-op when no transfer is active, close the registered conn when one
+// is, and a no-op again once the transfer has cleared it.
+func TestConn_AbortData(t *testing.T) {
+	c := &Conn{}
+	c.AbortData() // no active transfer → must not panic
+
+	client, server := net.Pipe()
+	defer server.Close()
+	c.setXfer(client)
+	c.AbortData() // closes the registered data conn
+
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := client.Read(make([]byte, 1)); err == nil {
+		t.Error("AbortData should have closed the data conn (Read should fail)")
+	}
+
+	c.clearXfer()
+	c.AbortData() // cleared → no-op again
+}
+
 // fakeServer is a minimal scripted FTP server for exercising the client's
 // control protocol and both data-connection modes over real loopback
 // sockets. passiveWorks=false makes the EPSV/PASV reply advertise a closed

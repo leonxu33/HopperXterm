@@ -105,6 +105,10 @@ type closerFunc func() error
 
 func (f closerFunc) Close() error { return f() }
 
+// voidCloser adapts a plain func() (e.g. a context.CancelFunc or an
+// AbortData call) into the io.Closer that watchCancel fires on cancel.
+func voidCloser(fn func()) io.Closer { return closerFunc(func() error { fn(); return nil }) }
+
 // OpenRemote opens a remote file for reading (RemoteReadable).
 func (s *SFTP) OpenRemote(p string) (io.ReadCloser, error) { return s.c.Open(p) }
 

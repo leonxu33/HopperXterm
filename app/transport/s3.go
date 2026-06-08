@@ -308,12 +308,18 @@ func (s *S3) Rename(src, dst string) error {
 }
 
 // Download streams an object to localPath.
-func (s *S3) Download(remotePath, localPath string, progress ProgressFunc, _ <-chan struct{}) (int64, error) {
+func (s *S3) Download(remotePath, localPath string, progress ProgressFunc, cancel <-chan struct{}) (int64, error) {
 	if s.client == nil {
 		return 0, errors.New("s3: not connected")
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, 1*time.Hour)
-	defer cancel()
+	ctx, ctxCancel := context.WithTimeout(s.ctx, 1*time.Hour)
+	defer ctxCancel()
+	// Transfer cancel aborts the request context, unblocking a body read
+	// stalled on a dead network (the progress callback alone can't — a
+	// stuck read never ticks). Closes only the remote request, not the
+	// local file, so there's no race with the os.Remove cleanup below.
+	stop := watchCancel(cancel, voidCloser(ctxCancel))
+	defer stop()
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.Bucket),
 		Key:    aws.String(strings.TrimPrefix(remotePath, "/")),
@@ -336,7 +342,7 @@ func (s *S3) Download(remotePath, localPath string, progress ProgressFunc, _ <-c
 }
 
 // Upload streams localPath to remotePath.
-func (s *S3) Upload(localPath, remotePath string, progress ProgressFunc, _ <-chan struct{}) (int64, error) {
+func (s *S3) Upload(localPath, remotePath string, progress ProgressFunc, cancel <-chan struct{}) (int64, error) {
 	if s.client == nil {
 		return 0, errors.New("s3: not connected")
 	}
@@ -350,8 +356,11 @@ func (s *S3) Upload(localPath, remotePath string, progress ProgressFunc, _ <-cha
 		return 0, err
 	}
 	pr := &progressReader{r: src, total: fi.Size(), progress: progress}
-	ctx, cancel := context.WithTimeout(s.ctx, 1*time.Hour)
-	defer cancel()
+	ctx, ctxCancel := context.WithTimeout(s.ctx, 1*time.Hour)
+	defer ctxCancel()
+	// Transfer cancel aborts the in-flight PutObject (and its body read).
+	stop := watchCancel(cancel, voidCloser(ctxCancel))
+	defer stop()
 	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(s.Bucket),
 		Key:           aws.String(strings.TrimPrefix(remotePath, "/")),
