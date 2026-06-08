@@ -1835,7 +1835,10 @@ function App() {
       }
       e.preventDefault();
       if (selectedSessionIdRef.current) setSidebarRenameTick((t) => t + 1);
-      else if (activeTabIdRef.current) setTabRenameTick((t) => t + 1);
+      else if (activeTabIdRef.current) {
+        setRenamingTabId(null);
+        setTabRenameTick((t) => t + 1);
+      }
     };
     window.addEventListener('keydown', onF2);
     return () => window.removeEventListener('keydown', onF2);
@@ -2128,7 +2131,10 @@ function App() {
       {
         kind: 'item',
         label: 'Rename tab',
-        onClick: () => setRenamingTabId(tabId),
+        onClick: () => {
+          setRenamingTabId(tabId);
+          setTabRenameTick((t) => t + 1);
+        },
       },
       {
         kind: 'item',
@@ -2333,6 +2339,7 @@ function App() {
                 newBtnRef={newTabBtnRef}
                 onRename={renameTab}
                 renameTick={tabRenameTick}
+                renameTargetId={renamingTabId}
                 onContextMenu={(tabId, x, y) => setTabCtxMenu({ tabId, x, y })}
                 onDropSession={openSessionById}
                 onDetachPane={detachPaneToNewTab}

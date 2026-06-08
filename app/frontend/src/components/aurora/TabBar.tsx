@@ -43,8 +43,10 @@ type Props = {
   // Ids of tabs that hold a temporary (quick-connect) pane. Such tabs show the
   // ⚡ badge and are merge-blocked. Derived once by the parent.
   tempTabIds?: ReadonlySet<string>;
-  // Bumped by the parent (F2) to start renaming the active tab inline.
+  // Bumped by the parent (F2 / "Rename tab" menu) to start an inline rename.
+  // Renames renameTargetId (the right-clicked tab) when set, else the active tab.
   renameTick?: number;
+  renameTargetId?: string | null;
 };
 
 export function TabBar({
@@ -62,6 +64,7 @@ export function TabBar({
   onDetachPane,
   tempTabIds,
   renameTick,
+  renameTargetId,
 }: Props) {
   const tabHasTemp = (t: Tab) => !!tempTabIds && tempTabIds.has(t.id);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
@@ -76,9 +79,11 @@ export function TabBar({
   // the measurement basis and the zone oscillates at the boundary.
   const tabMeasureRef = useRef<{ idx: number; left: number; width: number } | null>(null);
 
-  // F2 from the parent: begin inline rename of the active tab.
+  // F2 / "Rename tab" from the parent: begin an inline rename. Targets
+  // renameTargetId (the right-clicked tab) when set, else the active tab.
   useEffect(() => {
-    if (renameTick && activeId && onRename) setRenamingId(activeId);
+    const id = renameTargetId ?? activeId;
+    if (renameTick && id && onRename) setRenamingId(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renameTick]);
   const clearDrag = () => {
@@ -570,7 +575,11 @@ function tabStyle(active: boolean, isMergeTarget: boolean, isDragging: boolean):
     boxShadow: isMergeTarget
       ? `inset 0 0 0 1.5px ${TOKENS.accent}, 0 0 18px -4px ${TOKENS.accent}`
       : active
-        ? `inset 0 0 0 1px ${TOKENS.border}, 0 6px 14px -8px ${TOKENS.accent}40`
+        ? // accent is oklch, so a hex-alpha suffix (`${accent}40`) is invalid
+          // CSS and voids the whole box-shadow — the browser then keeps the
+          // prior value, leaving e.g. a stuck merge ring. Use color-mix for a
+          // valid, token-derived translucent accent.
+          `inset 0 0 0 1px ${TOKENS.border}, 0 6px 14px -8px color-mix(in oklch, ${TOKENS.accent} 25%, transparent)`
         : 'none',
     font: `500 ${FS.base}px/1 ${TOKENS.font}`,
     position: 'relative',
