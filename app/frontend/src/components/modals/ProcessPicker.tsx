@@ -5,7 +5,7 @@
 // that drifts off the row won't select it (the press-only convention is
 // reserved for the always-mounted nav surfaces).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FS, TOKENS } from '../../theme';
+import { FS, ICON, TOKENS } from '../../theme';
 import { ListProcesses } from '../../../wailsjs/go/main/App';
 import type { events } from '../../../wailsjs/go/models';
 import { Modal, TextInput, PrimaryButton, GhostButton } from './Modal';
@@ -67,6 +67,7 @@ export function ProcessPicker({
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'cpu', dir: 'desc' });
   const [mode, setMode] = useState<Mode>('pid');
+  const [spinning, setSpinning] = useState(false);
   const [pidInput, setPidInput] = useState('');
   const [cmdInput, setCmdInput] = useState('');
   const reqRef = useRef(0);
@@ -189,8 +190,31 @@ export function ProcessPicker({
         <div style={{ flex: 1 }}>
           <TextInput value={query} onChange={setQuery} placeholder="Filter by name or PID…" autoFocus />
         </div>
-        <button type="button" onClick={() => load()} style={refreshBtn} data-tip="Refresh now (auto-refreshes every 2s)">
-          ↻ Refresh
+        <button
+          type="button"
+          onClick={() => {
+            setSpinning(true);
+            setTimeout(() => setSpinning(false), 600);
+            load();
+          }}
+          style={refreshBtn}
+          data-tip="Refresh now"
+          aria-label="Refresh"
+        >
+          <svg
+            width={ICON.sm}
+            height={ICON.sm}
+            viewBox="0 0 14 14"
+            fill="none"
+            style={{
+              display: 'block',
+              transition: 'transform .6s',
+              transform: spinning ? 'rotate(360deg)' : 'rotate(0deg)',
+            }}
+          >
+            <path d="M11.5 6.5 A4.5 4.5 0 1 0 11 9.2" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinecap="round" />
+            <path d="M11.8 3.2 L11.5 6.5 L8.3 6" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </button>
       </div>
 
@@ -314,13 +338,15 @@ const modeSwitchWrap: React.CSSProperties = {
 };
 const refreshBtn: React.CSSProperties = {
   flex: '0 0 auto',
-  padding: '8px 12px',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: '8px 10px',
   border: `1px solid ${TOKENS.border}`,
   borderRadius: 8,
   background: 'rgba(255,255,255,0.05)',
   color: TOKENS.fgDim,
   cursor: 'pointer',
-  font: `500 ${FS.base}px/1 ${TOKENS.font}`,
 };
 const tableWrap: React.CSSProperties = {
   display: 'flex',

@@ -1652,7 +1652,7 @@ const wrap: CSSProperties = {
   font: `${FS.lg}px/1.2 ${TOKENS.font}`,
 };
 const toolbar: CSSProperties = {
-  padding: '0 12px 4px',
+  padding: '8px 12px 4px',
   display: 'flex',
   alignItems: 'center',
   gap: 6,

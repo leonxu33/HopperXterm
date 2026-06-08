@@ -1124,7 +1124,7 @@ function clamp(x: number, a: number, b: number) {
   return Math.max(a, Math.min(b, x));
 }
 
-const wrap: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 10, padding: '0 12px 14px' };
+const wrap: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 10, padding: '10px 12px 14px' };
 // Each monitor region (system / process) is its own flex column so a
 // right-click anywhere in it — cards or the gaps between them — hits that
 // region's scoped context menu.
