@@ -58,7 +58,13 @@ export type ResourceSample = {
 // Disconnected, ownership transfers to another connected pane on the
 // same host. If none remain, the poller stops; the buffer stays so
 // reopening a panel restores history immediately.
-const MAX_BUFFER = 1800; // 30 min @ 1 Hz — matches the largest UI window.
+// Retention cap, deliberately decoupled from the display window. The charts
+// only ever slice the last 30 min (WIN_POINTS maxes at 1800), but the full
+// buffer is what "Export to CSV" reads — so we keep up to 24 h of history to
+// make exports cover the whole monitoring session, not just the visible
+// window. The df/who/user blobs are stripped from all but the newest sample
+// (see setOwner) so this depth costs only the numeric fields (~a few MB).
+const MAX_BUFFER = 86400; // 24 h @ 1 Hz — retention depth for export.
 const MAX_HOSTS = 20; // LRU cap; idle hostKeys get evicted past this.
 
 type ResourceState = 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected';
@@ -204,6 +210,17 @@ function setOwner(entry: BufferEntry, newOwner: string | null) {
   entry.ownerOff = EventsOn(`resource:sample:${newOwner}`, (s: ResourceSample) => {
     if (entry.samples.length >= MAX_BUFFER) {
       entry.samples.splice(0, entry.samples.length - MAX_BUFFER + 1);
+    }
+    // The df/who/user blobs (base64 `df -h` / `who` snapshots) are read only
+    // off `latest` (StatusBar) and are never charted or exported. Retaining
+    // them on every sample would dominate memory at 24 h depth, so drop them
+    // from the now-penultimate sample before appending — only the newest
+    // sample (the one `latest` returns) carries them.
+    const prev = entry.samples[entry.samples.length - 1];
+    if (prev) {
+      prev.dfText = undefined;
+      prev.whoText = undefined;
+      prev.user = undefined;
     }
     entry.samples.push(s);
     const now = Date.now();
