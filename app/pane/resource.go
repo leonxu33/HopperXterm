@@ -177,7 +177,11 @@ df_b64="-"; who_b64="-"; user_b64="-"
 tick=0; first=1
 pagesize=$(sysctl -n hw.pagesize 2>/dev/null); [ -z "$pagesize" ] && pagesize=4096
 memtotal_kb=$(( $(sysctl -n hw.memsize 2>/dev/null) / 1024 ))
-boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9]*\).*/\1/p')
+# kern.boottime prints "{ sec = 1780098269, usec = 346309 } ...". Anchor the
+# capture on the literal "{" so the greedy ".*" can't slide the match into the
+# "usec = " token (whose "sec = " substring would otherwise capture usec, not
+# sec — making boot ~0 and uptime read as ~now, i.e. tens of thousands of days).
+boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ *sec *= *\([0-9]*\).*/\1/p')
 case "$boot" in ''|*[!0-9]*) boot=0;; esac
 while :; do
   # CPU: iostat -c 2 prints two samples ~1s apart (this also paces the
