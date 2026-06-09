@@ -17,6 +17,12 @@ import { GetUIPrefs, SetUIPref } from '../../wailsjs/go/main/App';
 /** User-defined terminal key bindings (array of lib/customKeys.CustomKey). */
 export const PREF_CUSTOM_TERM_KEYS = 'customTermKeys';
 
+/** Resource-monitor network unit: 'bps' (bits, default) or 'bytes' (B/s). */
+export const PREF_NET_SPEED_UNIT = 'netSpeedUnit';
+
+/** Resource-monitor disk I/O unit: 'bytes' (B/s, default) or 'bps' (bits). */
+export const PREF_DISK_SPEED_UNIT = 'diskSpeedUnit';
+
 let cache: Record<string, unknown> = {};
 const listeners = new Set<() => void>();
 
@@ -40,6 +46,12 @@ export function initUIPrefs(): void {
 export function getBoolPref(key: string, def: boolean): boolean {
   const v = cache[key];
   return typeof v === 'boolean' ? v : def;
+}
+
+/** Synchronous string read; `def` applies when unset or non-string. */
+export function getStringPref(key: string, def: string): string {
+  const v = cache[key];
+  return typeof v === 'string' ? v : def;
 }
 
 /** Synchronous raw read (undefined when unset). Callers validate the shape —
@@ -67,5 +79,16 @@ export function useBoolPref(key: string, def: boolean): boolean {
       return () => listeners.delete(cb);
     },
     () => getBoolPref(key, def),
+  );
+}
+
+/** React subscription for a string pref — re-renders on setPref/initUIPrefs. */
+export function useStringPref(key: string, def: string): string {
+  return useSyncExternalStore(
+    (cb) => {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+    () => getStringPref(key, def),
   );
 }

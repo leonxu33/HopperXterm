@@ -1,10 +1,11 @@
 // StatusBar — bottom strip inside the glass island. Mirrors StatusBar in
 // hopperterm-core.jsx:2268. Left: dot + user@host (no proto label). Middle
 // vertical dividers separate metric groups. Right: live CPU sparkline,
-// memory progress bar, network ↑/↓ MB/s.
+// memory progress bar, network ↑/↓ Mb/s.
 import React, { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { FS, TOKENS } from '../../theme';
+import { netMbps } from '../../lib/format';
 import { hostKeyFor, useResourceMonitor } from './ResourcePanel';
 import { EventsOn } from '../../../wailsjs/runtime/runtime';
 import { ContextMenu, Tooltip, type ContextMenuItem, type TooltipRow } from './primitives';
@@ -386,7 +387,7 @@ export function StatusBar({ paneId, session, state }: Props) {
           <VDivider />
           <Metric
             label="NET"
-            value={latest ? `↑${(latest.netTxKBs * 8 / 1000).toFixed(2)} ↓${(latest.netRxKBs * 8 / 1000).toFixed(2)} Mb/s` : '—'}
+            value={latest ? `↑${netMbps(latest.netTxKBs).toFixed(2)} ↓${netMbps(latest.netRxKBs).toFixed(2)} Mb/s` : '—'}
             color={TOKENS.fgDim}
           />
         </>

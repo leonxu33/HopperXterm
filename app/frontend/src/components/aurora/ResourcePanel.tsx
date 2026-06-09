@@ -20,7 +20,8 @@ import { EventsOn } from '../../../wailsjs/runtime/runtime';
 import { log } from '../../lib/log';
 import { ContextMenu } from './primitives';
 import type { ContextMenuItem } from './primitives';
-import { formatKB } from '../../lib/format';
+import { formatKB, formatRate } from '../../lib/format';
+import { useStringPref, setPref, PREF_NET_SPEED_UNIT, PREF_DISK_SPEED_UNIT } from '../../lib/uiprefs';
 import { ProcessPicker } from '../modals/ProcessPicker';
 import type { ProcTarget } from '../modals/ProcessPicker';
 
@@ -347,6 +348,11 @@ function useProcessMonitor(paneId: string | null, target: ProcTarget | null) {
   const [samples, setSamples] = useState<ProcessSample[]>([]);
   const [alive, setAlive] = useState(true);
   const lastAtRef = useRef(0);
+  // Timestamp (remote clock, from the first sample) when monitoring of the
+  // current target began. Kept in a ref so it survives the buffer rolling
+  // past MAX_PROC_BUFFER — the displayed "monitored time" then reflects the
+  // true watch duration, not just the charted window.
+  const startTsRef = useRef(0);
   const spec = target ? specOf(target) : null;
   const isCommand = target?.kind === 'command';
 
@@ -355,6 +361,7 @@ function useProcessMonitor(paneId: string | null, target: ProcTarget | null) {
     setSamples([]);
     setAlive(true);
     lastAtRef.current = 0;
+    startTsRef.current = 0;
     if (!paneId || !target || !spec) return;
     const start = () =>
       target.kind === 'pid'
@@ -373,6 +380,7 @@ function useProcessMonitor(paneId: string | null, target: ProcTarget | null) {
       // Command mode: buffer everything, including not-running zeros, so the
       // timeline shows downtime as a gap rather than freezing.
       if (!isCommand && !s.alive) return;
+      if (startTsRef.current === 0) startTsRef.current = s.ts;
       setSamples((prev) => {
         // Keep the last MAX_PROC_BUFFER-1, then append → caps at MAX_PROC_BUFFER.
         const next = prev.slice(Math.max(0, prev.length - MAX_PROC_BUFFER + 1));
@@ -395,8 +403,14 @@ function useProcessMonitor(paneId: string | null, target: ProcTarget | null) {
   // stays true while connected even when no process currently matches.
   const streamAlive = lastAtRef.current > 0 ? Date.now() - lastAtRef.current < 5000 : false;
   const running = isCommand ? streamAlive : alive && streamAlive;
-  const reset = () => setSamples([]);
-  return { samples, latest, running, alive, reset };
+  const reset = () => {
+    setSamples([]);
+    startTsRef.current = 0;
+  };
+  // Elapsed monitoring time (ms), from the first sample to the latest. Zero
+  // until the second distinct sample arrives or after a reset.
+  const monitoredMs = latest && startTsRef.current > 0 ? latest.ts - startTsRef.current : 0;
+  return { samples, latest, running, alive, reset, monitoredMs };
 }
 
 type Props = {
@@ -438,6 +452,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
     running: procRunning,
     alive: procAlive,
     reset: resetProc,
+    monitoredMs,
   } = useProcessMonitor(paneId, proc);
   // Display label + a stable key for the export filename.
   const procLabel = proc ? (proc.kind === 'pid' ? proc.name : proc.command) : '';
@@ -490,16 +505,29 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
   // even before samples arrive (items disable themselves when empty).
   const [sysMenu, setSysMenu] = useState<{ x: number; y: number } | null>(null);
   const [procMenu, setProcMenu] = useState<{ x: number; y: number } | null>(null);
+  // Rate-unit menu, shared by the Disk I/O and Network value readouts. Carries
+  // the pref key + current unit so the items target the right metric.
+  const [rateMenu, setRateMenu] = useState<{ x: number; y: number; prefKey: string; unit: string } | null>(null);
   const onSystemContext = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setSysMenu({ x: e.clientX, y: e.clientY });
+  };
+  // Right-click on a metric's value box switches its unit. stopPropagation
+  // keeps the enclosing system-area menu (Reset / Export) from also firing.
+  const onRateContext = (prefKey: string, unit: string) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setRateMenu({ x: e.clientX, y: e.clientY, prefKey, unit });
   };
   const onProcessContext = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setProcMenu({ x: e.clientX, y: e.clientY });
   };
+  // Rate units (persisted). Network defaults to bits, disk to bytes.
+  const netUnit = useStringPref(PREF_NET_SPEED_UNIT, 'bps');
+  const diskUnit = useStringPref(PREF_DISK_SPEED_UNIT, 'bytes');
   const onResetBuffer = () => {
     resetResourceBuffer(hostKey);
   };
@@ -614,6 +642,32 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
       ]
     : [{ kind: 'item', label: 'Monitor a process…', onClick: () => setPickerOpen(true) }];
 
+  // Active unit gets a check; the other a matching-width blank so labels align.
+  const unitCheck = (active: boolean) =>
+    active ? (
+      <svg width={13} height={13} viewBox="0 0 16 16" fill="none">
+        <path d="M3.5 8.5 L6.5 11.5 L12.5 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ) : (
+      <span style={{ width: 13, height: 13, display: 'block' }} />
+    );
+  const rateItems: ContextMenuItem[] = rateMenu
+    ? [
+        {
+          kind: 'item',
+          label: 'Bits per second (b/s)',
+          icon: unitCheck(rateMenu.unit !== 'bytes'),
+          onClick: () => setPref(rateMenu.prefKey, 'bps'),
+        },
+        {
+          kind: 'item',
+          label: 'Bytes per second (B/s)',
+          icon: unitCheck(rateMenu.unit === 'bytes'),
+          onClick: () => setPref(rateMenu.prefKey, 'bytes'),
+        },
+      ]
+    : [];
+
   return (
     <div style={wrap}>
       {sysMenu && (
@@ -621,6 +675,9 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
       )}
       {procMenu && (
         <ContextMenu x={procMenu.x} y={procMenu.y} items={procItems} onClose={() => setProcMenu(null)} />
+      )}
+      {rateMenu && (
+        <ContextMenu x={rateMenu.x} y={rateMenu.y} items={rateItems} onClose={() => setRateMenu(null)} />
       )}
       {noSession && <div style={emptyState}>No active session.</div>}
       {notConnected && (
@@ -682,17 +739,19 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
             <Pair
               label="Disk I/O"
               slots={points}
+              onValueContext={onRateContext(PREF_DISK_SPEED_UNIT, diskUnit)}
               series={[
-                { name: 'read', value: latest ? formatRate(latest.diskRdKBs) : '—', data: series.diskRd, color: COLOR_READ },
-                { name: 'write', value: latest ? formatRate(latest.diskWrKBs) : '—', data: series.diskWr, color: COLOR_WRITE },
+                { name: 'read', value: latest ? formatRate(latest.diskRdKBs, diskUnit) : '—', data: series.diskRd, color: COLOR_READ },
+                { name: 'write', value: latest ? formatRate(latest.diskWrKBs, diskUnit) : '—', data: series.diskWr, color: COLOR_WRITE },
               ]}
             />
             <Pair
               label="Network"
               slots={points}
+              onValueContext={onRateContext(PREF_NET_SPEED_UNIT, netUnit)}
               series={[
-                { name: 'down', value: latest ? formatRate(latest.netRxKBs) : '—', data: series.netRx, color: COLOR_DOWN },
-                { name: 'up', value: latest ? formatRate(latest.netTxKBs) : '—', data: series.netTx, color: COLOR_UP },
+                { name: 'down', value: latest ? formatRate(latest.netRxKBs, netUnit) : '—', data: series.netRx, color: COLOR_DOWN },
+                { name: 'up', value: latest ? formatRate(latest.netTxKBs, netUnit) : '—', data: series.netTx, color: COLOR_UP },
               ]}
             />
 
@@ -790,6 +849,12 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
                     : null
                 }
               />
+              {procSamples.length > 0 && (
+                <div style={footRow}>
+                  <span style={footLbl}>ELAPSED</span>
+                  <span style={footVal}>{formatElapsed(Math.floor(monitoredMs / 1000))}</span>
+                </div>
+              )}
             </>
           )}
           </div>
@@ -907,7 +972,19 @@ function Card({
 }
 
 type PairSeries = { name: string; value: string; data: number[]; color: string };
-function Pair({ label, slots, series }: { label: string; slots: number; series: PairSeries[] }) {
+function Pair({
+  label,
+  slots,
+  series,
+  onValueContext,
+}: {
+  label: string;
+  slots: number;
+  series: PairSeries[];
+  // Right-click handler scoped to the value readouts (the "number box") only,
+  // not the whole card — used to switch the rate unit.
+  onValueContext?: (e: React.MouseEvent) => void;
+}) {
   let mx = 0.5;
   for (const s of series) for (const v of s.data) if (v > mx) mx = v;
   const finalMax = mx * 1.15;
@@ -916,40 +993,45 @@ function Pair({ label, slots, series }: { label: string; slots: number; series: 
       <div style={cardHeader}>
         <span style={cardLabel}>{label}</span>
         <span style={{ flex: 1 }} />
-        {series.map((s) => (
-          <span
-            key={s.name}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 5,
-              marginLeft: 10,
-              font: `${FS.sm}px/1 ${TOKENS.mono}`,
-              color: TOKENS.fgDim,
-            }}
-          >
+        <span
+          onContextMenu={onValueContext}
+          style={{ display: 'flex', alignItems: 'center', cursor: onValueContext ? 'context-menu' : undefined }}
+        >
+          {series.map((s) => (
             <span
+              key={s.name}
               style={{
-                width: 8,
-                height: 2.5,
-                borderRadius: 1.5,
-                background: s.color,
-                boxShadow: `0 0 6px ${s.color}`,
-              }}
-            />
-            <span
-              style={{
-                color: TOKENS.fgMute,
-                textTransform: 'uppercase',
-                letterSpacing: '.05em',
-                fontSize: FS.xs,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                marginLeft: 10,
+                font: `${FS.sm}px/1 ${TOKENS.mono}`,
+                color: TOKENS.fgDim,
               }}
             >
-              {s.name}
+              <span
+                style={{
+                  width: 8,
+                  height: 2.5,
+                  borderRadius: 1.5,
+                  background: s.color,
+                  boxShadow: `0 0 6px ${s.color}`,
+                }}
+              />
+              <span
+                style={{
+                  color: TOKENS.fgMute,
+                  textTransform: 'uppercase',
+                  letterSpacing: '.05em',
+                  fontSize: FS.xs,
+                }}
+              >
+                {s.name}
+              </span>
+              <span style={{ color: TOKENS.fg }}>{s.value}</span>
             </span>
-            <span style={{ color: TOKENS.fg }}>{s.value}</span>
-          </span>
-        ))}
+          ))}
+        </span>
       </div>
       <PairSpark series={series} max={finalMax} slots={slots} height={56} />
     </div>
@@ -1109,16 +1191,25 @@ function PairSpark({
   );
 }
 
-function formatRate(kbs: number): string {
-  if (kbs < 1024) return `${kbs.toFixed(2)} KB/s`;
-  return `${(kbs / 1024).toFixed(2)} MB/s`;
-}
-
 function formatUptime(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
   return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
+}
+
+// Elapsed time at 1-second resolution. The minute and hour fields appear only
+// once they're non-zero, so it grows "45s" → "1m 5s" → "1h 2m 5s". Negatives
+// clamp to "0s" — a non-monotonic remote clock (NTP step) can make the latest
+// sample's timestamp predate the first one.
+export function formatElapsed(seconds: number): string {
+  if (seconds <= 0) return '0s';
+  const s = seconds % 60;
+  const m = Math.floor(seconds / 60) % 60;
+  const h = Math.floor(seconds / 3600);
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 function clamp(x: number, a: number, b: number) {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hostKeyFor, getResourceBuffer, resetResourceBuffer, specOf } from './ResourcePanel';
+import { hostKeyFor, getResourceBuffer, resetResourceBuffer, specOf, formatElapsed } from './ResourcePanel';
 
 describe('hostKeyFor', () => {
   it('returns null for nullish sessions', () => {
@@ -42,6 +42,31 @@ describe('specOf', () => {
 
   it('builds a cmd spec for a command target', () => {
     expect(specOf({ kind: 'command', command: 'test-binary' })).toBe('cmd:test-binary');
+  });
+});
+
+describe('formatElapsed', () => {
+  it('shows seconds only below one minute', () => {
+    expect(formatElapsed(0)).toBe('0s');
+    expect(formatElapsed(45)).toBe('45s');
+    expect(formatElapsed(59)).toBe('59s');
+  });
+
+  it('clamps negative input (non-monotonic remote clock) to 0s', () => {
+    expect(formatElapsed(-1)).toBe('0s');
+    expect(formatElapsed(-3725)).toBe('0s');
+  });
+
+  it('adds the minute field from one minute up', () => {
+    expect(formatElapsed(60)).toBe('1m 0s');
+    expect(formatElapsed(65)).toBe('1m 5s');
+    expect(formatElapsed(3599)).toBe('59m 59s');
+  });
+
+  it('adds the hour field from one hour up', () => {
+    expect(formatElapsed(3600)).toBe('1h 0m 0s');
+    expect(formatElapsed(3725)).toBe('1h 2m 5s');
+    expect(formatElapsed(90061)).toBe('25h 1m 1s');
   });
 });
 
