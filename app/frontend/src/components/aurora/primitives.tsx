@@ -171,7 +171,7 @@ export function Resizer({ onMouseDown }: { onMouseDown: (e: ReactMouseEvent) => 
 // Glass blur context menu anchored at (x, y). Auto-closes on outside click /
 // Esc. Mirrors the menu used by sidebar / tab bar in the design.
 export type ContextMenuItem =
-  | { kind: 'item'; label: string; icon?: ReactNode; danger?: boolean; onClick: () => void; disabled?: boolean }
+  | { kind: 'item'; label: string; icon?: ReactNode; danger?: boolean; onClick: () => void; disabled?: boolean; shortcut?: string }
   | { kind: 'submenu'; label: string; icon?: ReactNode; disabled?: boolean; items: ContextMenuItem[] }
   | { kind: 'separator' };
 
@@ -249,6 +249,11 @@ function MenuRow({
         </span>
       )}
       <span style={{ flex: 1 }}>{it.label}</span>
+      {it.kind === 'item' && it.shortcut && (
+        <span style={{ flex: '0 0 auto', color: TOKENS.fgDim, font: `500 ${FS.xs}px/1 ${TOKENS.font}` }}>
+          {it.shortcut}
+        </span>
+      )}
       {it.kind === 'submenu' && (
         <svg width={11} height={11} viewBox="0 0 12 12" fill="none" style={{ flex: '0 0 auto', opacity: 0.7 }}>
           <path d="M4.5 3 L8 6 L4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />

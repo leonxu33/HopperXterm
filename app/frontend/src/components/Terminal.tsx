@@ -589,6 +589,7 @@ export function Terminal({
     {
       kind: 'item',
       label: 'Copy',
+      shortcut: isMac() ? '⌘C' : 'Ctrl+Shift+C',
       disabled: !menu?.hasSelection,
       onClick: copySelection,
       icon: (
@@ -601,6 +602,7 @@ export function Terminal({
     {
       kind: 'item',
       label: 'Paste',
+      shortcut: isMac() ? '⌘V' : 'Ctrl+Shift+V',
       onClick: pasteClipboard,
       icon: (
         <svg width={ICON.sm} height={ICON.sm} viewBox="0 0 16 16" fill="none">
