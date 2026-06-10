@@ -42,6 +42,16 @@ export function WithTip({
   return <>{children}</>;
 }
 
+// ─── CloseIcon ──────────────────────────────────────────────────────────────
+// Shared ✕ glyph for close actions in menus and headers.
+export function CloseIcon({ size = ICON.sm }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <path d="M4 4 L12 12 M12 4 L4 12" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 // ─── ToolBtn ──────────────────────────────────────────────────────────────
 // Tab-row toolbar icon button (Workspaces, Sync input, SFTP, Resources).
 // Box is BTN.tool — shared with the sidebar HeaderBtn so they stay identical.

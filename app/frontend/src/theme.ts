@@ -21,6 +21,10 @@ export const TOKENS = {
 
   border: 'rgba(255,255,255,0.08)',
   borderHi: 'rgba(255,255,255,0.14)',
+  // Splitter divider between panels inside a pane — brighter than borderHi
+  // (same visibility tier as the pane-grid cell borders) so the boundary
+  // reads over terminal content.
+  divider: 'rgba(255,255,255,0.28)',
 
   glassBg: 'rgba(18,22,30,0.55)',
   glassBg2: 'rgba(24,28,38,0.42)',

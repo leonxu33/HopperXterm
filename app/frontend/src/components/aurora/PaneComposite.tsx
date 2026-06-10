@@ -18,6 +18,7 @@ import { useEffect, useState } from 'react';
 import { FS, ICON, TOKENS } from '../../theme';
 import { moveLeaf, updateLeaf, type DropZone } from '../../lib/splitTree';
 import { dockWeightForZone, isPanelKind, type PanelKind, type PanelNode } from '../../lib/panels';
+import { CloseIcon, ContextMenu } from './primitives';
 import { SplitView } from './SplitView';
 
 export type PanelBodyRenderer = (
@@ -98,6 +99,9 @@ export function PaneComposite({
     <SplitView<unknown>
       layout={panels}
       onLayoutChange={(next) => onPanelsChange(next as PanelNode)}
+      // Panels draw no cell borders of their own (unlike the outer pane
+      // grid), so the splitter carries a visible 1px boundary line.
+      dividerColor={TOKENS.divider}
       renderLeaf={(leaf) => {
         // A PanelNode leaf's id IS its kind by construction; this narrows the
         // generic tree's `string` id back to PanelKind (the fallback never
@@ -176,6 +180,7 @@ function PanelCell({
   renderBody: () => ReactNode;
 }) {
   const label = PANEL_LABELS[kind];
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const hasPanelType = (e: React.DragEvent) =>
     e.dataTransfer.types.includes('application/x-hopper-panel');
@@ -251,6 +256,11 @@ function PanelCell({
             onDragStart();
           }}
           onDragEnd={onDragEnd}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setMenu({ x: e.clientX, y: e.clientY });
+          }}
           style={panelHeaderStyle(isActivePane)}
         >
           <span style={{ display: 'flex', alignItems: 'center', flex: '0 0 auto', opacity: 0.85 }}>
@@ -298,6 +308,18 @@ function PanelCell({
         {renderBody()}
         <PanelDropOverlay hover={hoverZone} />
       </div>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={[
+            // The header (and so this menu) only exists when multiPanel, and
+            // multiPanel implies closable — no disabled state needed.
+            { kind: 'item', label: `Close ${label.toLowerCase()} panel`, danger: true, onClick: onClose, icon: <CloseIcon /> },
+          ]}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }

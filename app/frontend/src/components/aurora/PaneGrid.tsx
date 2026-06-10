@@ -20,7 +20,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { useEffect, useState } from 'react';
 import { ICON, FS, TOKENS, PROTOCOL_COLORS } from '../../theme';
 import { ProtoIcon, PROTO_LABELS } from './ProtoIcon';
-import { ContextMenu, WithTip, type ContextMenuItem } from './primitives';
+import { CloseIcon, ContextMenu, WithTip, type ContextMenuItem } from './primitives';
 import { SplitView } from './SplitView';
 import { PaneComposite } from './PaneComposite';
 import {
@@ -526,6 +526,8 @@ function PaneHeader({
     { kind: 'item', label: 'Split right', disabled: !onSplitRight || !canSplit, onClick: () => onSplitRight?.(), icon: splitRightIcon },
     { kind: 'item', label: 'Split down', disabled: !onSplitDown || !canSplit, onClick: () => onSplitDown?.(), icon: splitDownIcon },
     ...(addPanelItems.length ? [{ kind: 'separator' as const }, ...addPanelItems] : []),
+    { kind: 'separator' },
+    { kind: 'item', label: 'Close pane', danger: true, onClick: onClose, icon: <CloseIcon />, shortcut: 'Ctrl+Shift+W' },
   ];
 
   return (

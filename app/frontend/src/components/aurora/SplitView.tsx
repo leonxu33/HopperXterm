@@ -10,7 +10,7 @@
 // It is generic over the leaf payload `P`, so the SAME component drives both
 // the outer pane grid (payload = { sessionId }) and each pane's inner panel
 // arrangement (payload = {}). See PaneGrid.tsx and PaneComposite.tsx.
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { useRef } from 'react';
 import {
   collectGeometry,
@@ -33,7 +33,14 @@ type Props<P> = {
   /** Minimum fraction a pane can shrink to within its split (default 0.1). */
   minFrac?: number;
   splitterTip?: string;
+  /** Draw a 1px line down the middle of each splitter. Omit when the leaves
+   *  draw their own boundary (the outer pane grid uses cell borders). */
+  dividerColor?: string;
 };
+
+// Centered 1px line inside the 6px splitter hit area, per axis.
+const DIVIDER_X: CSSProperties = { position: 'absolute', left: 2.5, top: 0, bottom: 0, width: 1 };
+const DIVIDER_Y: CSSProperties = { position: 'absolute', top: 2.5, left: 0, right: 0, height: 1 };
 
 export function SplitView<P>({
   layout,
@@ -41,6 +48,7 @@ export function SplitView<P>({
   onLayoutChange,
   minFrac = 0.1,
   splitterTip = 'Drag to resize',
+  dividerColor,
 }: Props<P>) {
   const gridRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{
@@ -166,7 +174,11 @@ export function SplitView<P>({
                       zIndex: 4,
                     }
               }
-            />
+            >
+              {dividerColor && (
+                <div style={{ ...(s.axis === 'x' ? DIVIDER_X : DIVIDER_Y), background: dividerColor }} />
+              )}
+            </div>
           );
         })}
     </div>
