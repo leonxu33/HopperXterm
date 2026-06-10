@@ -169,7 +169,8 @@ type ProcessSample struct {
 	CPUPct float64 `json:"cpuPct"` // top-style; may exceed 100 across cores
 	MemKB  int64   `json:"memKB"`  // resident set size (RSS)
 	Alive  bool    `json:"alive"`
-	Spec   string  `json:"spec"` // "pid:<n>" | "cmd:<name>"
+	Spec   string  `json:"spec"`   // "pid:<n>" | "cmd:<name>"
+	Uptime int64   `json:"uptime"` // seconds since the process started; 0 when unknown
 }
 
 // EmitProcessSample emits one per-process tick for the given pane. All

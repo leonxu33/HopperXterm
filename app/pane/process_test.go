@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseProcessLine_OK(t *testing.T) {
-	s, ok := parseProcessLine("p1 1700000000123 4321 175 524288 1")
+	s, ok := parseProcessLine("p1 1700000000123 4321 175 524288 1 7200")
 	if !ok {
 		t.Fatalf("parse ok=false for valid line")
 	}
@@ -25,10 +25,24 @@ func TestParseProcessLine_OK(t *testing.T) {
 	if !s.Alive {
 		t.Errorf("Alive should be true")
 	}
+	if s.Uptime != 7200 {
+		t.Errorf("Uptime got %d, want 7200", s.Uptime)
+	}
+}
+
+func TestParseProcessLine_SixFieldsNoUptime(t *testing.T) {
+	// The uptime field is optional — old 6-field lines parse with Uptime 0.
+	s, ok := parseProcessLine("p1 1700000000123 4321 175 524288 1")
+	if !ok {
+		t.Fatalf("6-field line should parse")
+	}
+	if s.Uptime != 0 {
+		t.Errorf("Uptime should default to 0, got %d", s.Uptime)
+	}
 }
 
 func TestParseProcessLine_ExitedTick(t *testing.T) {
-	s, ok := parseProcessLine("p1 1700000000123 4321 0 0 0")
+	s, ok := parseProcessLine("p1 1700000000123 4321 0 0 0 0")
 	if !ok {
 		t.Fatalf("exited tick should parse")
 	}
@@ -52,8 +66,8 @@ func TestParseProcessLine_Reject(t *testing.T) {
 	cases := []string{
 		"",
 		"p1",
-		"p1 1 2 3 4",         // 5 tokens (want 6)
-		"p1 1 2 3 4 5 6",     // 7 tokens
+		"p1 1 2 3 4",         // 5 tokens (want 6 or 7)
+		"p1 1 2 3 4 5 6 7",   // 8 tokens
 		"v3 1 2 3 4 5",       // wrong prefix
 		"p2 1700 1 2 3 1",    // wrong version
 	}
@@ -200,8 +214,9 @@ func TestProcessCmdScriptsEmitP1AndNotRunning(t *testing.T) {
 		if !strings.Contains(scr, "p1 ") {
 			t.Errorf("%s command script does not emit a p1 line", name)
 		}
-		// Must emit a not-running tick (pid 0, alive 0) rather than ending.
-		if !strings.Contains(scr, "p1 $ts 0 0 0 0") {
+		// Must emit a not-running tick (pid 0, alive 0, uptime 0) rather
+		// than ending.
+		if !strings.Contains(scr, "p1 $ts 0 0 0 0 0") {
 			t.Errorf("%s command script missing the not-running tick", name)
 		}
 	}

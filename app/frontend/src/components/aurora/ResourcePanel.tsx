@@ -344,6 +344,7 @@ export type ProcessSample = {
   memKB: number;
   alive: boolean;
   spec: string; // "pid:<n>" | "cmd:<name>" — demuxes shared pane event
+  uptime: number; // seconds since the process started; 0 when unknown
 };
 
 export function specOf(t: ProcTarget): string {
@@ -550,11 +551,11 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
   };
   const onExportProcCsv = async () => {
     if (!proc || procSamples.length === 0) return;
-    const header = ['unix_ts_seconds', 'iso_time', 'pid', 'cpu_pct', 'mem_kb'].join(',');
+    const header = ['unix_ts_seconds', 'iso_time', 'pid', 'cpu_pct', 'mem_kb', 'uptime_seconds'].join(',');
     const lines: string[] = [header];
     for (const s of procSamples) {
       lines.push(
-        [Math.floor(s.ts / 1000), new Date(s.ts).toISOString(), s.pid, s.cpuPct.toFixed(2), s.memKB].join(','),
+        [Math.floor(s.ts / 1000), new Date(s.ts).toISOString(), s.pid, s.cpuPct.toFixed(2), s.memKB, s.uptime ?? 0].join(','),
       );
     }
     const csv = lines.join('\n') + '\n';
@@ -739,6 +740,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
               color={TOKENS.accent}
               max={100}
               slots={points}
+              format={(v) => `${Math.round(v)}%`}
             />
             <Card
               label="Memory"
@@ -752,11 +754,13 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
               max={100}
               slots={points}
               legend={totalMemGB ? `of ${totalMemGB.toFixed(2)} GB` : null}
+              format={(v) => `${v.toFixed(1)}%`}
             />
             <Pair
               label="Disk I/O"
               slots={points}
               onValueContext={onRateContext(PREF_DISK_SPEED_UNIT, diskUnit)}
+              format={(v) => formatRate(v, diskUnit)}
               series={[
                 { name: 'read', value: latest ? formatRate(latest.diskRdKBs, diskUnit) : '—', data: series.diskRd, color: COLOR_READ },
                 { name: 'write', value: latest ? formatRate(latest.diskWrKBs, diskUnit) : '—', data: series.diskWr, color: COLOR_WRITE },
@@ -766,6 +770,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
               label="Network"
               slots={points}
               onValueContext={onRateContext(PREF_NET_SPEED_UNIT, netUnit)}
+              format={(v) => formatRate(v, netUnit)}
               series={[
                 { name: 'down', value: latest ? formatRate(latest.netRxKBs, netUnit) : '—', data: series.netRx, color: COLOR_DOWN },
                 { name: 'up', value: latest ? formatRate(latest.netTxKBs, netUnit) : '—', data: series.netTx, color: COLOR_UP },
@@ -852,6 +857,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
                 color={COLOR_UP}
                 max={procCpuMax}
                 slots={points}
+                format={(v) => `${Math.round(v)}%`}
               />
               <Card
                 label="Process Memory"
@@ -860,6 +866,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
                 color={COLOR_WRITE}
                 max={procMemMax}
                 slots={points}
+                format={(v) => formatKB(v)}
                 legend={
                   procLatest && latest && latest.memTotalKB > 0
                     ? `${((procLatest.memKB / latest.memTotalKB) * 100).toFixed(1)}% of total`
@@ -868,7 +875,16 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
               />
               {procSamples.length > 0 && (
                 <div style={footRow}>
-                  <span style={footLbl}>ELAPSED</span>
+                  {/* UPTIME: how long the process has been running. WATCH: how
+                      long we've been monitoring it. */}
+                  <span style={footLbl}>UPTIME</span>
+                  <span style={footVal}>
+                    {procLatest && procLatest.alive && procLatest.uptime > 0
+                      ? formatElapsed(procLatest.uptime)
+                      : '—'}
+                  </span>
+                  <span style={{ flex: 1 }} />
+                  <span style={footLbl}>WATCH</span>
                   <span style={footVal}>{formatElapsed(Math.floor(monitoredMs / 1000))}</span>
                 </div>
               )}
@@ -966,6 +982,7 @@ function Card({
   max = 100,
   slots,
   legend,
+  format,
 }: {
   label: string;
   value: string;
@@ -974,6 +991,8 @@ function Card({
   max?: number;
   slots: number;
   legend?: string | null;
+  // Formats one data point for the hover readout (e.g. "42%" / "1.2 GB").
+  format?: (v: number) => string;
 }) {
   return (
     <div style={cardStyle}>
@@ -982,7 +1001,7 @@ function Card({
         <span style={{ flex: 1 }} />
         <span style={cardValue(color)}>{value}</span>
       </div>
-      <BigSpark data={data} color={color} max={max} slots={slots} height={56} />
+      <BigSpark data={data} color={color} max={max} slots={slots} height={56} format={format} />
       {legend && <div style={cardLegend}>{legend}</div>}
     </div>
   );
@@ -994,6 +1013,7 @@ function Pair({
   slots,
   series,
   onValueContext,
+  format,
 }: {
   label: string;
   slots: number;
@@ -1001,6 +1021,8 @@ function Pair({
   // Right-click handler scoped to the value readouts (the "number box") only,
   // not the whole card — used to switch the rate unit.
   onValueContext?: (e: React.MouseEvent) => void;
+  // Formats one data point for the hover readout, in the card's active unit.
+  format?: (v: number) => string;
 }) {
   let mx = 0.5;
   for (const s of series) for (const v of s.data) if (v > mx) mx = v;
@@ -1050,9 +1072,19 @@ function Pair({
           ))}
         </span>
       </div>
-      <PairSpark series={series} max={finalMax} slots={slots} height={56} />
+      <PairSpark series={series} max={finalMax} slots={slots} height={56} format={format} />
     </div>
   );
+}
+
+// Map a mouse x inside the chart back to a data index — the inverse of
+// slotX. Returns null when the cursor is over an empty slot (a fresh chart
+// fills from the right, so the left side has no data yet).
+export function hoverIndexAt(clientX: number, rect: { left: number }, w: number, slots: number, n: number): number | null {
+  const denom = Math.max(1, slots - 1);
+  const slotIdx = Math.round(((clientX - rect.left - 1) / Math.max(1, w - 2)) * denom);
+  const di = slotIdx - (slots - n);
+  return di >= 0 && di < n ? di : null;
 }
 
 // Slot-based positioning: each sample occupies one fixed-width slot, so a
@@ -1066,21 +1098,30 @@ function slotX(i: number, n: number, slots: number, w: number): number {
   return (slotIdx / denom) * (w - 2) + 1;
 }
 
+// Map a data value to its y pixel inside a chart of the given height —
+// 3px top/bottom inset, clamped to the [0, max] scale.
+function valueToY(v: number, max: number, height: number): number {
+  return height - (clamp(v, 0, max) / max) * (height - 6) - 3;
+}
+
 function BigSpark({
   data,
   color,
   max,
   slots,
   height,
+  format,
 }: {
   data: number[];
   color: string;
   max: number;
   slots: number;
   height: number;
+  format?: (v: number) => string;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [w, setW] = useState(220);
+  const [hover, setHover] = useState<number | null>(null);
   useEffect(() => {
     if (!ref.current) return;
     const ro = new ResizeObserver((entries) => {
@@ -1095,11 +1136,7 @@ function BigSpark({
   // Empty / single-point cases skip the line+area drawing but still render
   // the frame and gridlines so the chart doesn't pop into existence.
   const showLine = n >= 2;
-  const pts: Array<[number, number]> = data.map((v, i) => {
-    const x = slotX(i, n, slots, w);
-    const y = height - (clamp(v, 0, max) / max) * (height - 6) - 3;
-    return [x, y];
-  });
+  const pts: Array<[number, number]> = data.map((v, i) => [slotX(i, n, slots, w), valueToY(v, max, height)]);
   const linePath = pts
     .map(([x, y], i) => (i === 0 ? `M${x.toFixed(2)} ${y.toFixed(2)}` : `L${x.toFixed(2)} ${y.toFixed(2)}`))
     .join(' ');
@@ -1107,9 +1144,19 @@ function BigSpark({
     ? `${linePath} L${pts[pts.length - 1][0].toFixed(2)} ${height - 1} L${pts[0][0].toFixed(2)} ${height - 1} Z`
     : '';
   const last = pts[pts.length - 1];
+  // The buffer slides under a stationary cursor (a new sample shifts every
+  // point left), so re-clamp the hovered index against the current length on
+  // every render rather than trusting the stored value.
+  const hpt = hover !== null && hover < pts.length ? pts[hover] : null;
   return (
-    <div ref={ref} style={{ width: '100%' }}>
-      <svg width={w} height={height} style={{ display: 'block' }}>
+    <div ref={ref} style={{ width: '100%', position: 'relative' }}>
+      <svg
+        width={w}
+        height={height}
+        style={{ display: 'block' }}
+        onMouseMove={(e) => setHover(hoverIndexAt(e.clientX, e.currentTarget.getBoundingClientRect(), w, slots, n))}
+        onMouseLeave={() => setHover(null)}
+      >
         <defs>
           <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0" stopColor={color} stopOpacity={0.4} />
@@ -1127,7 +1174,18 @@ function BigSpark({
         {last && (
           <circle cx={last[0]} cy={last[1]} r={2} fill={color} style={{ filter: `drop-shadow(0 0 4px ${color})` }} />
         )}
+        {hpt && (
+          <g pointerEvents="none">
+            <line x1={hpt[0]} x2={hpt[0]} y1={height - 1} y2={hpt[1]} stroke={color} strokeWidth={1} strokeDasharray="2 2" opacity={0.8} />
+            <circle cx={hpt[0]} cy={hpt[1]} r={2.5} fill={color} style={{ filter: `drop-shadow(0 0 4px ${color})` }} />
+          </g>
+        )}
       </svg>
+      {hpt && hover !== null && (
+        <div style={{ ...sparkTip, left: clamp(hpt[0], 24, w - 24), top: Math.max(hpt[1] - 6, 24) }}>
+          {(format ?? defaultPointFormat)(data[hover])}
+        </div>
+      )}
     </div>
   );
 }
@@ -1137,14 +1195,17 @@ function PairSpark({
   max,
   slots,
   height,
+  format,
 }: {
   series: PairSeries[];
   max: number;
   slots: number;
   height: number;
+  format?: (v: number) => string;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [w, setW] = useState(220);
+  const [hover, setHover] = useState<number | null>(null);
   useEffect(() => {
     if (!ref.current) return;
     const ro = new ResizeObserver((entries) => {
@@ -1154,9 +1215,32 @@ function PairSpark({
     ro.observe(ref.current);
     return () => ro.disconnect();
   }, []);
+  // Both series come from the same sample window, so they share one length
+  // and one hovered index. Re-derive the points each render (the buffer
+  // slides under a stationary cursor).
+  const n = series.length > 0 ? series[0].data.length : 0;
+  const hoverPts =
+    hover !== null && hover < n
+      ? series.map((s) => ({
+          name: s.name,
+          color: s.color,
+          v: s.data[hover],
+          x: slotX(hover, n, slots, w),
+          y: valueToY(s.data[hover], max, height),
+        }))
+      : [];
+  // Top of the crosshair / tooltip anchor — the higher of the two points.
+  const hoverTopY = hoverPts.length > 0 ? Math.min(...hoverPts.map((p) => p.y)) : 0;
+  const fmt = format ?? defaultPointFormat;
   return (
-    <div ref={ref} style={{ width: '100%' }}>
-      <svg width={w} height={height} style={{ display: 'block' }}>
+    <div ref={ref} style={{ width: '100%', position: 'relative' }}>
+      <svg
+        width={w}
+        height={height}
+        style={{ display: 'block' }}
+        onMouseMove={(e) => setHover(hoverIndexAt(e.clientX, e.currentTarget.getBoundingClientRect(), w, slots, n))}
+        onMouseLeave={() => setHover(null)}
+      >
         <rect x={0.5} y={0.5} width={w - 1} height={height - 1} rx={4} fill="none" stroke="rgba(255,255,255,0.07)" />
         {[0.25, 0.5, 0.75].map((t) => (
           <line key={t} x1={1} x2={w - 1} y1={height * t} y2={height * t} stroke="rgba(255,255,255,0.05)" strokeDasharray="2 3" />
@@ -1165,11 +1249,7 @@ function PairSpark({
           const n = s.data.length;
           if (n === 0) return null;
           const showLine = n >= 2;
-          const pts: Array<[number, number]> = s.data.map((v, i) => {
-            const x = slotX(i, n, slots, w);
-            const y = height - (clamp(v, 0, max) / max) * (height - 6) - 3;
-            return [x, y];
-          });
+          const pts: Array<[number, number]> = s.data.map((v, i) => [slotX(i, n, slots, w), valueToY(v, max, height)]);
           const linePath = pts
             .map(([x, y], i) => (i === 0 ? `M${x.toFixed(2)} ${y.toFixed(2)}` : `L${x.toFixed(2)} ${y.toFixed(2)}`))
             .join(' ');
@@ -1203,7 +1283,39 @@ function PairSpark({
             </g>
           );
         })}
+        {hoverPts.length > 0 && (
+          <g pointerEvents="none">
+            <line
+              x1={hoverPts[0].x}
+              x2={hoverPts[0].x}
+              y1={height - 1}
+              y2={hoverTopY}
+              stroke="rgba(255,255,255,0.45)"
+              strokeWidth={1}
+              strokeDasharray="2 2"
+            />
+            {hoverPts.map((p) => (
+              <circle key={p.name} cx={p.x} cy={p.y} r={2.5} fill={p.color} style={{ filter: `drop-shadow(0 0 4px ${p.color})` }} />
+            ))}
+          </g>
+        )}
       </svg>
+      {hoverPts.length > 0 && (
+        <div
+          style={{
+            ...sparkTip,
+            left: clamp(hoverPts[0].x, 24, w - 24),
+            top: Math.max(hoverTopY - 6, 24),
+          }}
+        >
+          {hoverPts.map((p) => (
+            <span key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ width: 7, height: 2.5, borderRadius: 1.5, background: p.color, flex: '0 0 auto' }} />
+              {fmt(p.v)}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1216,14 +1328,18 @@ function formatUptime(seconds: number): string {
 }
 
 // Elapsed time at 1-second resolution. The minute and hour fields appear only
-// once they're non-zero, so it grows "45s" → "1m 5s" → "1h 2m 5s". Negatives
-// clamp to "0s" — a non-monotonic remote clock (NTP step) can make the latest
+// once they're non-zero, so it grows "45s" → "1m 5s" → "1h 2m 5s". Past 24
+// hours it rolls into days and drops the seconds ("1d 2h 5m"), matching the
+// day-scale granularity of the system UPTIME readout. Negatives clamp to
+// "0s" — a non-monotonic remote clock (NTP step) can make the latest
 // sample's timestamp predate the first one.
 export function formatElapsed(seconds: number): string {
   if (seconds <= 0) return '0s';
   const s = seconds % 60;
   const m = Math.floor(seconds / 60) % 60;
-  const h = Math.floor(seconds / 3600);
+  const h = Math.floor(seconds / 3600) % 24;
+  const d = Math.floor(seconds / 86400);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
@@ -1232,6 +1348,31 @@ export function formatElapsed(seconds: number): string {
 function clamp(x: number, a: number, b: number) {
   return Math.max(a, Math.min(b, x));
 }
+
+// Fallback hover formatter when a chart doesn't pass a unit-aware one.
+function defaultPointFormat(v: number): string {
+  return v.toFixed(1);
+}
+
+// Hover value readout, anchored above the hovered point (translate(-50%,
+// -100%)). pointerEvents: none so it never steals the hover from the svg.
+const sparkTip: CSSProperties = {
+  position: 'absolute',
+  transform: 'translate(-50%, -100%)',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 3,
+  padding: '4px 7px',
+  borderRadius: 6,
+  background: 'rgba(18,20,28,0.92)',
+  boxShadow: `inset 0 0 0 1px ${TOKENS.borderHi}`,
+  font: `540 ${FS.sm}px/1.1 ${TOKENS.mono}`,
+  color: TOKENS.fg,
+  fontVariantNumeric: 'tabular-nums',
+  whiteSpace: 'nowrap',
+  pointerEvents: 'none',
+  zIndex: 5,
+};
 
 const wrap: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 10, padding: '10px 12px 14px' };
 // Each monitor region (system / process) is its own flex column so a

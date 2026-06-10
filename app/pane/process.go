@@ -30,10 +30,11 @@ import (
 // Line format (one per second), shared by all three OS scripts so the Go
 // parser is platform-agnostic:
 //
-//	p1 ts_ms pid cpuPct memKB alive
+//	p1 ts_ms pid cpuPct memKB alive uptimeSec
 //
 // alive is 1 normally and 0 on the single final tick emitted when the PID
-// has gone, after which the script exits and the stream ends.
+// has gone, after which the script exits and the stream ends. uptimeSec is
+// how long the process has been running (0 when unknown / not running).
 
 // linuxProcScript reads /proc/<pid>/{stat,status}. $pid is supplied by
 // prepending a `pid=N` assignment on stdin (see processStreamCmd).
@@ -43,22 +44,27 @@ prev=-1
 while :; do
   if [ ! -d /proc/$pid ]; then
     ts=$(date +%s%3N 2>/dev/null); case "$ts" in ''|*[!0-9]*) ts=$(($(date +%s)*1000));; esac
-    echo "p1 $ts $pid 0 0 0"
+    echo "p1 $ts $pid 0 0 0 0"
     break
   fi
   # /proc/<pid>/stat: comm (field 2) is wrapped in parens and may itself
   # contain spaces or ')', so strip up to the LAST ') ' to land on field 3
   # (state). After dropping fields 1-2 the positions shift by 2, so utime
-  # (field 14) is ${12} and stime (field 15) is ${13}.
+  # (field 14) is ${12}, stime (field 15) is ${13} and starttime (field 22,
+  # jiffies since boot) is ${20}.
   stat=$(cat /proc/$pid/stat 2>/dev/null)
   rest=${stat##*) }
   set -- $rest
-  utime=${12}; stime=${13}
+  utime=${12}; stime=${13}; start=${20}
   case "$utime" in ''|*[!0-9]*) utime=0;; esac
   case "$stime" in ''|*[!0-9]*) stime=0;; esac
+  case "$start" in ''|*[!0-9]*) start=0;; esac
   proc=$((utime+stime))
   rss=$(awk '/^VmRSS:/{print $2}' /proc/$pid/status 2>/dev/null)
   case "$rss" in ''|*[!0-9]*) rss=0;; esac
+  read up _ < /proc/uptime; up=${up%%.*}
+  case "$up" in ''|*[!0-9]*) up=0;; esac
+  ets=$((up - start/clk)); [ "$ets" -lt 0 ] && ets=0
   if [ "$prev" -lt 0 ]; then
     cpu=0
   else
@@ -69,7 +75,7 @@ while :; do
   fi
   prev=$proc
   ts=$(date +%s%3N 2>/dev/null); case "$ts" in ''|*[!0-9]*) ts=$(($(date +%s)*1000));; esac
-  echo "p1 $ts $pid $cpu $rss 1"
+  echo "p1 $ts $pid $cpu $rss 1 $ets"
   sleep 1
 done
 `
@@ -77,19 +83,22 @@ done
 // darwinProcScript uses BSD ps. pcpu is already top-style (can exceed 100
 // on multi-core) and rss is in KiB. ps over a non-PTY exec is safe — unlike
 // top, which hangs without a controlling terminal (see the macOS poller
-// notes in resource.go).
+// notes in resource.go). etime ("[[dd-]hh:]mm:ss") is folded to seconds by
+// the awk right-to-left walk (units climb s→m→h→d).
 const darwinProcScript = `
 while :; do
-  line=$(ps -p $pid -o pcpu=,rss= 2>/dev/null)
+  line=$(ps -p $pid -o pcpu=,rss=,etime= 2>/dev/null)
   ts=$(( $(date +%s) * 1000 ))
   if [ -z "$line" ]; then
-    echo "p1 $ts $pid 0 0 0"
+    echo "p1 $ts $pid 0 0 0 0"
     break
   fi
   set -- $line
-  cpu=$1; rss=$2
+  cpu=$1; rss=$2; et=$3
   case "$rss" in ''|*[!0-9]*) rss=0;; esac
-  echo "p1 $ts $pid $cpu $rss 1"
+  ets=$(printf %s "$et" | awk '{n=split($0,a,/[-:]/); s=a[n]+a[n-1]*60; if(n>=3)s+=a[n-2]*3600; if(n>=4)s+=a[n-3]*86400; print int(s)}')
+  case "$ets" in ''|*[!0-9]*) ets=0;; esac
+  echo "p1 $ts $pid $cpu $rss 1 $ets"
   sleep 1
 done
 `
@@ -107,12 +116,14 @@ while($true){
   $ts=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $p=Get-Process -Id $tpid -ErrorAction SilentlyContinue
   if($p -eq $null){
-    [Console]::Out.WriteLine("p1 $ts $tpid 0 0 0")
+    [Console]::Out.WriteLine("p1 $ts $tpid 0 0 0 0")
     [Console]::Out.Flush()
     break
   }
   $cpuSec=[double]$p.CPU
   $rss=[int64]($p.WorkingSet64/1024)
+  $et=0; try{ $et=[int64](([DateTime]::Now-$p.StartTime).TotalSeconds) }catch{}
+  if($et -lt 0){ $et=0 }
   $now=[double][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   if($prev -lt 0){
     $cpu=0
@@ -124,7 +135,7 @@ while($true){
     $cpu=[int][math]::Round(100*$dc/$dt)
   }
   $prev=$cpuSec; $prevT=$now
-  [Console]::Out.WriteLine("p1 $ts $tpid $cpu $rss 1")
+  [Console]::Out.WriteLine("p1 $ts $tpid $cpu $rss 1 $et")
   [Console]::Out.Flush()
   Start-Sleep -Seconds 1
 }
@@ -160,7 +171,7 @@ while :; do
   pid=$(pgrep -x "$cmdname" 2>/dev/null | head -n1)
   ts=$(date +%s%3N 2>/dev/null); case "$ts" in ''|*[!0-9]*) ts=$(($(date +%s)*1000));; esac
   if [ -z "$pid" ] || [ ! -d /proc/$pid ]; then
-    echo "p1 $ts 0 0 0 0"
+    echo "p1 $ts 0 0 0 0 0"
     prev=-1; prevpid=0
     sleep 1; continue
   fi
@@ -169,15 +180,19 @@ while :; do
   stat=$(cat /proc/$pid/stat 2>/dev/null)
   rest=${stat##*) }
   set -- $rest
-  utime=${12}; stime=${13}
+  utime=${12}; stime=${13}; start=${20}
   case "$utime" in ''|*[!0-9]*) utime=0;; esac
   case "$stime" in ''|*[!0-9]*) stime=0;; esac
+  case "$start" in ''|*[!0-9]*) start=0;; esac
   proc=$((utime+stime))
   rss=$(awk '/^VmRSS:/{print $2}' /proc/$pid/status 2>/dev/null)
   case "$rss" in ''|*[!0-9]*) rss=0;; esac
+  read up _ < /proc/uptime; up=${up%%.*}
+  case "$up" in ''|*[!0-9]*) up=0;; esac
+  ets=$((up - start/clk)); [ "$ets" -lt 0 ] && ets=0
   if [ "$prev" -lt 0 ]; then cpu=0; else d=$((proc-prev)); [ "$d" -lt 0 ] && d=0; cpu=$((100*d/clk)); fi
   prev=$proc
-  echo "p1 $ts $pid $cpu $rss 1"
+  echo "p1 $ts $pid $cpu $rss 1 $ets"
   sleep 1
 done
 `
@@ -186,13 +201,15 @@ const darwinProcCmdScript = `
 while :; do
   pid=$(pgrep -x "$cmdname" 2>/dev/null | head -n1)
   ts=$(( $(date +%s) * 1000 ))
-  if [ -z "$pid" ]; then echo "p1 $ts 0 0 0 0"; sleep 1; continue; fi
-  line=$(ps -p $pid -o pcpu=,rss= 2>/dev/null)
-  if [ -z "$line" ]; then echo "p1 $ts 0 0 0 0"; sleep 1; continue; fi
+  if [ -z "$pid" ]; then echo "p1 $ts 0 0 0 0 0"; sleep 1; continue; fi
+  line=$(ps -p $pid -o pcpu=,rss=,etime= 2>/dev/null)
+  if [ -z "$line" ]; then echo "p1 $ts 0 0 0 0 0"; sleep 1; continue; fi
   set -- $line
-  cpu=$1; rss=$2
+  cpu=$1; rss=$2; et=$3
   case "$rss" in ''|*[!0-9]*) rss=0;; esac
-  echo "p1 $ts $pid $cpu $rss 1"
+  ets=$(printf %s "$et" | awk '{n=split($0,a,/[-:]/); s=a[n]+a[n-1]*60; if(n>=3)s+=a[n-2]*3600; if(n>=4)s+=a[n-3]*86400; print int(s)}')
+  case "$ets" in ''|*[!0-9]*) ets=0;; esac
+  echo "p1 $ts $pid $cpu $rss 1 $ets"
   sleep 1
 done
 `
@@ -204,7 +221,7 @@ while($true){
   $ts=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $p=Get-Process -Name $cmdname -ErrorAction SilentlyContinue | Sort-Object Id | Select-Object -First 1
   if($p -eq $null){
-    [Console]::Out.WriteLine("p1 $ts 0 0 0 0")
+    [Console]::Out.WriteLine("p1 $ts 0 0 0 0 0")
     [Console]::Out.Flush()
     $prev=-1.0; $prevpid=0
     Start-Sleep -Seconds 1; continue
@@ -214,6 +231,8 @@ while($true){
   $prevpid=$cur
   $cpuSec=[double]$p.CPU
   $rss=[int64]($p.WorkingSet64/1024)
+  $et=0; try{ $et=[int64](([DateTime]::Now-$p.StartTime).TotalSeconds) }catch{}
+  if($et -lt 0){ $et=0 }
   $now=[double][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   if($prev -lt 0){ $cpu=0 } else {
     $dt=($now-$prevT)/1000.0; if($dt -le 0){ $dt=1.0 }
@@ -221,7 +240,7 @@ while($true){
     $cpu=[int][math]::Round(100*$dc/$dt)
   }
   $prev=$cpuSec; $prevT=$now
-  [Console]::Out.WriteLine("p1 $ts $cur $cpu $rss 1")
+  [Console]::Out.WriteLine("p1 $ts $cur $cpu $rss 1 $et")
   [Console]::Out.Flush()
   Start-Sleep -Seconds 1
 }
@@ -290,10 +309,12 @@ $rows | Sort-Object Cpu -Descending | Select-Object -First 200 | ForEach-Object 
 const maxProcessList = 200
 
 // parseProcessLine turns one streamed "p1 …" record into a ProcessSample.
-// Non-numeric fields zero out rather than rejecting the whole line.
+// Non-numeric fields zero out rather than rejecting the whole line. The
+// trailing uptime field is optional (6-field lines parse with Uptime 0) so
+// a remote shell that mangles the last token degrades gracefully.
 func parseProcessLine(line string) (events.ProcessSample, bool) {
 	parts := strings.Fields(line)
-	if len(parts) != 6 || parts[0] != "p1" {
+	if (len(parts) != 6 && len(parts) != 7) || parts[0] != "p1" {
 		return events.ProcessSample{}, false
 	}
 	atoi := func(s string) int64 {
@@ -304,13 +325,17 @@ func parseProcessLine(line string) (events.ProcessSample, bool) {
 		v, _ := strconv.ParseFloat(s, 64)
 		return v
 	}
-	return events.ProcessSample{
+	s := events.ProcessSample{
 		TS:     atoi(parts[1]),
 		PID:    int(atoi(parts[2])),
 		CPUPct: atof(parts[3]),
 		MemKB:  atoi(parts[4]),
 		Alive:  parts[5] == "1",
-	}, true
+	}
+	if len(parts) == 7 {
+		s.Uptime = atoi(parts[6])
+	}
+	return s, true
 }
 
 // parseProcessList parses the one-shot list output for the picker. Unix and
