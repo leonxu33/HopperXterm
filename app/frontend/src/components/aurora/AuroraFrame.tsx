@@ -10,15 +10,16 @@ export function AuroraFrame({ children }: { children: ReactNode }) {
   return (
     <div
       // hx-window-round: on Linux we round the frameless window's corners in CSS
-      // (no DWM); this frame already clips its children via overflow:hidden, so
-      // the radius rounds the whole app. Win/mac ignore the class (see style.css).
-      className="hx-window-round"
+      // (no DWM); this frame clips its children via hx-clip, so the radius
+      // rounds the whole app. Win/mac ignore the class (see style.css).
+      // hx-clip: scroll-immune clip — see .hx-clip in style.css. A stuck focus
+      // scroll on the window frame would shift the entire UI.
+      className="hx-window-round hx-clip"
       style={{
         position: 'fixed',
         inset: 0,
         font: `${FS.lg}px/1.4 ${TOKENS.font}`,
         color: TOKENS.fg,
-        overflow: 'hidden',
         background: '#0a0d12',
       }}
     >

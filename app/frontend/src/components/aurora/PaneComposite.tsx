@@ -193,6 +193,9 @@ function PanelCell({
 
   return (
     <div
+      // hx-clip: scroll-immune clip, not overflow:hidden — a stuck focus
+      // scroll here painted the terminal outside its slot (see style.css).
+      className="hx-clip"
       style={{
         width: '100%',
         height: '100%',
@@ -201,7 +204,6 @@ function PanelCell({
         position: 'relative',
         display: 'flex',
         flexDirection: 'column',
-        overflow: 'hidden',
       }}
       onDragOver={(e) => {
         // Only react to a panel drag that started in THIS pane.

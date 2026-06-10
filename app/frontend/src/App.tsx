@@ -122,6 +122,7 @@ import { MacrosPopover, type MacroEntry } from './components/modals/MacrosPopove
 import { RecordMacroModal } from './components/modals/RecordMacroModal';
 import { ConfirmDialog, Modal, Field, TextInput, SecretInput, PrimaryButton, GhostButton, isModalOpen } from './components/modals/Modal';
 import { ICON, FS, TOKENS, FOLDER_COLORS, isFileOnly } from './theme';
+import { RELAYOUT_EVENT } from './lib/relayout';
 
 type WorkspaceTab = { label: string; layout: WsNode | LegacyColumn[] };
 type WorkspaceSnapshot = { name: string; tabs: WorkspaceTab[]; updatedAt: number };
@@ -1578,6 +1579,36 @@ function App() {
     toggleFullscreenRef.current = toggleFullscreen;
   }, [tabs, activeTabId, activePaneByTab, selectedSessionId, deleteSessionConfirm, splitPane, closePane, toggleFullscreen]);
 
+  // Broadcast a relayout signal whenever pane/panel GEOMETRY changes (close,
+  // split, resize, panel add/remove/move) so every mounted terminal re-fits to
+  // its new slot. Terminals normally self-fit via their own ResizeObserver, but
+  // WebView2 can drop a notification when a sibling pane closes and the survivor
+  // grows — leaving a stale, blank terminal until a manual drag. This guarantees
+  // a fit attempt regardless; the signature gate keeps it to real geometry
+  // changes (not every per-pane state tick).
+  const lastGeomSig = useRef('');
+  const relayoutTimer = useRef(0);
+  useEffect(() => {
+    // The layout trees carry only structural fields (id/weight/dir/children/
+    // sessionId/panels) — pane *state* lives elsewhere — so serializing them
+    // changes exactly when geometry does (incl. weights during a drag).
+    const next = `${activeTabId}::${JSON.stringify(tabs.map((t) => t.layout))}`;
+    if (next === lastGeomSig.current) return;
+    lastGeomSig.current = next;
+    // Debounce: closing/splitting a pane fires a burst of geometry changes as
+    // the tree settles. Collapse them into ONE broadcast on the settled layout
+    // so each terminal fits (and remounts its WebGL canvas) once, against
+    // stable geometry — not repeatedly on transient mid-settle sizes.
+    if (relayoutTimer.current) window.clearTimeout(relayoutTimer.current);
+    relayoutTimer.current = window.setTimeout(
+      () => window.dispatchEvent(new Event(RELAYOUT_EVENT)),
+      120,
+    );
+  }, [tabs, activeTabId]);
+  // Unmount-only timer cleanup — a per-run cleanup would cancel a pending
+  // broadcast whenever a non-geometry tabs tick re-runs the effect mid-debounce.
+  useEffect(() => () => window.clearTimeout(relayoutTimer.current), []);
+
   useEffect(() => {
     // F1 shows the shortcut cheat-sheet. Two interaction models, by platform:
     //
@@ -2197,6 +2228,9 @@ function App() {
           body keeps the panel's lighter tone rather than a flat dark fill. No
           backdrop-filter blur (always-on surface — see backdrop-filter-perf). */}
       <div
+        // hx-clip: scroll-immune clip — see .hx-clip in style.css. A stuck
+        // focus scroll here would shift the entire app body.
+        className="hx-clip"
         style={{
           position: 'absolute',
           top: fullscreen ? 0 : TOKENS.topChromeHeight + 10,
@@ -2206,7 +2240,6 @@ function App() {
           background: `linear-gradient(180deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.015) 100%), ${TOKENS.glassBg}`,
           display: 'flex',
           flexDirection: 'column',
-          overflow: 'hidden',
           zIndex: 1,
         }}
       >

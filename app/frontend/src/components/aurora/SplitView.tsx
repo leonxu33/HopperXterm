@@ -106,6 +106,9 @@ export function SplitView<P>({
   return (
     <div
       ref={gridRef}
+      // hx-clip: scroll-immune clip, not overflow:hidden — a stuck focus
+      // scroll here would shift every absolutely-placed leaf (see style.css).
+      className="hx-clip"
       style={{
         flex: '1 1 auto',
         width: '100%',
@@ -113,7 +116,6 @@ export function SplitView<P>({
         minHeight: 0,
         minWidth: 0,
         position: 'relative',
-        overflow: 'hidden',
       }}
     >
       {placed.map(({ leaf, rect }) => (

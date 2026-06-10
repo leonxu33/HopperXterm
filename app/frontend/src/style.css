@@ -13,6 +13,20 @@ html, body {
   height: 100vh;
 }
 
+/* Clip WITHOUT scrollability — for the pane/panel layout containers.
+   overflow:hidden boxes can still be scrolled programmatically, and the
+   browser's focus scroll-into-view does exactly that when xterm's textarea is
+   focused mid pane-close (while geometry is transiently wrong): it leaves a
+   stuck scrollTop on the panel cell, painting the terminal shifted out of its
+   own slot ("covered"), with no way back since the content normally fits
+   exactly (so nothing re-clamps the offset). overflow:clip forbids ALL
+   scrolling, including programmatic; engines without clip support fall back
+   to the preceding hidden declaration (legacy behavior, no regression). */
+.hx-clip {
+  overflow: hidden;
+  overflow: clip;
+}
+
 /* Custom scrollbars — match the dark glass theme. */
 * {
   scrollbar-width: thin;

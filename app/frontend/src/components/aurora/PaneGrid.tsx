@@ -309,6 +309,8 @@ function PaneCellView({ leaf, ctx }: { leaf: PaneLeaf; ctx: RenderCtx }) {
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
+      // hx-clip: scroll-immune clip, not overflow:hidden (see style.css).
+      className="hx-clip"
       style={cellStyle(active, ctx.multiPane)}
     >
       {info && (
@@ -758,7 +760,8 @@ function cellStyle(active: boolean, multiPane: boolean): CSSProperties {
     border: `${borderWidth}px solid ${borderColor}`,
     boxSizing: 'border-box',
     borderRadius: 0,
-    overflow: 'hidden',
+    // overflow comes from the hx-clip class at the usage site (clip, with a
+    // hidden fallback) — an inline overflow here would override it.
     background: 'rgba(8,12,18,0.5)',
   };
 }

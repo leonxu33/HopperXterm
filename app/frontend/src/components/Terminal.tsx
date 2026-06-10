@@ -22,6 +22,7 @@ import { isMac } from '../lib/platform';
 // shell and WSL). Read synchronously per keypress from the uiprefs cache
 // (memoized sanitize — see lib/customKeys).
 import { getCustomKeys, matchCustomKey, parseSeq, shellFamilyForKind, shellKind } from '../lib/customKeys';
+import { RELAYOUT_EVENT } from '../lib/relayout';
 
 const paneRoot: CSSProperties = { position: 'relative', width: '100%', height: '100%' };
 
@@ -466,36 +467,71 @@ export function Terminal({
     // xterm handles correctly — so we never fit mid-burst; we wait ~120ms after
     // the last resize notification and fit a single time. The container still
     // tracks the drag via its CSS %-rect; only the text reflow waits.
-    const doFit = () => {
+    let settleTimer = 0;
+    let healTimer = 0;
+    let lastW = 0;
+    let lastH = 0;
+    let lastDpr = window.devicePixelRatio;
+    const doFit = (attempt = 0) => {
+      const el = containerRef.current;
+      if (!el) return;
       try {
         fit.fit();
         pushPtySize(term.cols, term.rows);
-        // Rebuild the WebGL renderer with a fresh canvas after a settled
-        // resize. Resizing an existing WebGL canvas leaves blurry text on
-        // fractional-DPR (Windows) displays and can leave stale/ghosted
-        // scrollback rows; clearTextureAtlas() (glyph-only) doesn't fix the
-        // blur. A freshly-attached canvas renders crisp (see remountWebgl), so
-        // we recreate it here. Only when WebGL is currently attached (active
-        // tab) — background tabs use the DOM renderer and must not claim a GPU
-        // context. Debounced via the ResizeObserver settle, so this is once per
-        // resize gesture, not per frame.
-        if (webglRef.current) remountWebgl();
+        // Rebuild the WebGL canvas (the fresh-canvas crispness fix — see
+        // remountWebgl) only when the container's PIXEL size or the
+        // device-pixel-ratio actually changed: the `hopper:relayout` broadcast
+        // fans a fit out to every terminal, and panes that didn't resize don't
+        // need (or want) a canvas rebuild. Only while WebGL is attached
+        // (active tab) — background tabs use the DOM renderer.
+        const dpr = window.devicePixelRatio;
+        const w = el.clientWidth;
+        const h = el.clientHeight;
+        if (webglRef.current && (w !== lastW || h !== lastH || dpr !== lastDpr)) remountWebgl();
+        lastW = w;
+        lastH = h;
+        lastDpr = dpr;
       } catch {
         // Container hidden / detached — fit throws; ignore until shown again.
+        return;
+      }
+      // Self-heal: confirm the rendered terminal actually fills its container.
+      // When a pane closes and a sibling grows, WebView2 can drop the
+      // ResizeObserver notification for the survivor, so the only fit() ran
+      // against the old (smaller) size and the xterm is left stale — a tiny,
+      // often blank/black strip in a now-tall slot. fit() reads the *live*
+      // container each call, so re-fitting against the current size recovers
+      // it. Retry a few times at 120ms intervals until the xterm pixel height
+      // converges on the container (a sub-row remainder is expected, so allow
+      // ~2 rows of slack). Bounded so a genuinely short slot never loops.
+      const cellH = Math.ceil((term.options.fontSize ?? 14) * (term.options.lineHeight ?? 1));
+      const containerH = el.clientHeight;
+      const renderedH = (el.querySelector('.xterm') as HTMLElement | null)?.offsetHeight ?? 0;
+      if (attempt < 4 && containerH > 0 && containerH - renderedH > cellH * 2) {
+        if (healTimer) window.clearTimeout(healTimer);
+        healTimer = window.setTimeout(() => doFit(attempt + 1), 120);
       }
     };
-    let settleTimer = 0;
-    const ro = new ResizeObserver(() => {
+    // Debounce a fit to ~120ms after the last trigger. Two triggers feed it:
+    // the container's own ResizeObserver, and the pane grid's RELAYOUT_EVENT
+    // broadcast — a safety net for when WebView2 drops the RO notification as a
+    // sibling pane closes and this one grows, which would otherwise strand the
+    // terminal stale until a manual drag. doFit's self-heal then converges it.
+    const scheduleFit = () => {
       if (settleTimer) window.clearTimeout(settleTimer);
-      settleTimer = window.setTimeout(doFit, 120);
-    });
+      settleTimer = window.setTimeout(() => doFit(), 120);
+    };
+    const ro = new ResizeObserver(scheduleFit);
     ro.observe(containerRef.current);
+    window.addEventListener(RELAYOUT_EVENT, scheduleFit);
     // Initial size to the remote.
     pushPtySize(term.cols, term.rows);
 
     return () => {
       for (const t of refitTimers) window.clearTimeout(t);
       if (settleTimer) window.clearTimeout(settleTimer);
+      if (healTimer) window.clearTimeout(healTimer);
+      window.removeEventListener(RELAYOUT_EVENT, scheduleFit);
       ro.disconnect();
       inputDisposable.dispose();
       off();
