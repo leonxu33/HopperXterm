@@ -27,7 +27,8 @@ import {
   SftpCopyRemote,
   LocalIsDir,
 } from '../../../wailsjs/go/main/App';
-import { EventsOn, OnFileDrop, OnFileDropOff } from '../../../wailsjs/runtime/runtime';
+import { EventsOn } from '../../../wailsjs/runtime/runtime';
+import { registerFileDropZone } from '../../lib/fileDropRouter';
 import { log } from '../../lib/log';
 import { IconBtn, ContextMenu, WithTip } from './primitives';
 import type { ContextMenuItem } from './primitives';
@@ -491,23 +492,27 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
   // ── Drag-and-drop upload ──────────────────────────────────────────
   // Wails' native file-drop (main.go EnableFileDrop) delivers dropped-in
   // OS files' absolute paths — HTML5 dataTransfer.files has no paths in
-  // WebView2, so this is the only way to upload by drag. useDropTarget
-  // scopes drops to the table (marked with --wails-drop-target below).
-  // The dragenter/leave depth counter drives the hover overlay.
+  // WebView2, so this is the only way to upload by drag. Wails supports
+  // a single app-wide drop listener, so the panel enrolls its listing as
+  // a zone in fileDropRouter, which dispatches each drop to the panel
+  // under the cursor. The dragenter/leave depth counter drives the hover
+  // overlay; uploadLocals is read through a ref so navigation doesn't
+  // need to re-enroll the zone.
   const [dragOver, setDragOver] = useState(false);
   const dragDepth = useRef(0);
+  const dropZoneRef = useRef<HTMLDivElement | null>(null);
+  const uploadLocalsRef = useRef(uploadLocals);
+  uploadLocalsRef.current = uploadLocals;
   useEffect(() => {
     if (!paneId || paneState !== 'Connected') return;
-    OnFileDrop((_x, _y, paths) => {
+    const el = dropZoneRef.current;
+    if (!el) return;
+    return registerFileDropZone(paneId, el, (paths) => {
       dragDepth.current = 0;
       setDragOver(false);
-      if (paths && paths.length) void uploadLocals(paths);
-    }, true);
-    return () => OnFileDropOff();
-    // Re-register when the target dir changes so uploads land in the
-    // currently-shown folder.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paneId, paneState, cwd]);
+      void uploadLocalsRef.current(paths);
+    });
+  }, [paneId, paneState]);
 
   // ── Cross-pane drag-and-drop copy ─────────────────────────────────
   // Each Remote Files panel is both a drag SOURCE (its rows are
@@ -1068,6 +1073,7 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
       )}
 
       <div
+        ref={dropZoneRef}
         onDragEnter={(e) => {
           // A cross-pane Remote Files drag is a server-to-server copy.
           if (onRemoteFilesHover(e)) return;
