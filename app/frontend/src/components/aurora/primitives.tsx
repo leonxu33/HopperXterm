@@ -311,17 +311,20 @@ export function ContextMenu({
   const py = Math.max(8, Math.min(window.innerHeight - H - 8, y));
 
   // Position the nested submenu beside its row, flipping to the left edge
-  // when there isn't room on the right.
+  // when there isn't room on the right. The bottom clamp uses the submenu's
+  // real row count (capped at its 360px maxHeight) — a fixed guess shoves a
+  // short submenu far above its row when the menu sits near the bottom edge.
+  const openItem = openSub ? items[openSub.index] : null;
   let subPos: { x: number; y: number } | null = null;
-  if (openSub) {
+  if (openSub && openItem?.kind === 'submenu') {
     const r = openSub.rect;
     const openLeft = r.right + W + 8 > window.innerWidth;
+    const subH = Math.min(360, Math.max(1, openItem.items.length) * 30 + 8);
     subPos = {
       x: openLeft ? r.left - W + 4 : r.right - 4,
-      y: Math.min(r.top - 4, window.innerHeight - 8 - 200),
+      y: Math.max(8, Math.min(r.top - 4, window.innerHeight - 8 - subH)),
     };
   }
-  const openItem = openSub ? items[openSub.index] : null;
 
   // Portal to document.body so the menu's position:fixed coordinates
   // are always viewport-relative. Otherwise an ancestor with
