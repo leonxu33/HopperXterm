@@ -8,6 +8,10 @@ import type { CSSProperties, ReactNode } from 'react';
 import { ICON, FS, TOKENS } from '../../theme';
 import {
   CancelSftpTransfer,
+  FileEditList,
+  FileEditOpen,
+  FileEditStop,
+  FileOpenWith,
   GetPaneCwd,
   GetPaneOSFamily,
   InstallOsc7Hook,
@@ -29,6 +33,7 @@ import {
 } from '../../../wailsjs/go/main/App';
 import { EventsOn } from '../../../wailsjs/runtime/runtime';
 import { registerFileDropZone } from '../../lib/fileDropRouter';
+import { isWindows } from '../../lib/platform';
 import { log } from '../../lib/log';
 import { IconBtn, ContextMenu, WithTip } from './primitives';
 import type { ContextMenuItem } from './primitives';
@@ -65,6 +70,16 @@ type Transfer = {
   // Used by the auto-drop ticker so done / error / cancelled rows
   // fade out after a brief cool-down.
   finishedAt?: number;
+};
+
+// One active "open external / edit remotely" session: a remote file mirrored
+// to a local temp copy and watched, so saves in the external app re-upload.
+type EditRow = {
+  id: string;
+  remotePath: string;
+  status: 'editing' | 'saved' | 'error';
+  error?: string;
+  at?: number; // ms of the last saved/error transition (drives the transient label)
 };
 
 type Props = {
@@ -125,6 +140,7 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [anchor, setAnchor] = useState<string | null>(null);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
+  const [edits, setEdits] = useState<EditRow[]>([]);
   // "Follow terminal folder" — when on, navigate the panel whenever the
   // shell emits OSC 7. Backend emits pane:cwd:{paneId} from the PTY stream.
   const [followTerm, setFollowTerm] = useState(false);
@@ -300,6 +316,94 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
     return () => clearInterval(t);
   }, [transfers.length]);
 
+  // ── External-edit ("Edit" / "Open with…") session tracking ─────────
+  // Load the active edit sessions for this pane on mount/pane-swap, then
+  // keep them current from the global extedit:event stream (filtered to
+  // this pane). Saves/errors surface here; an upload error also lands in
+  // the error bar via showErr.
+  useEffect(() => {
+    if (!paneId) {
+      setEdits([]);
+      return;
+    }
+    let cancelled = false;
+    void FileEditList()
+      .then((list) => {
+        if (cancelled) return;
+        setEdits(
+          (list || [])
+            .filter((e) => e.paneId === paneId)
+            .map((e) => ({ id: e.id, remotePath: e.remotePath, status: 'editing' as const })),
+        );
+      })
+      .catch(() => {});
+    const off = EventsOn(
+      'extedit:event',
+      (p: { id: string; paneId: string; remotePath: string; state: string; error?: string }) => {
+        if (p.paneId !== paneId) return;
+        if (p.state === 'error' && p.error) showErr(`Save failed: ${p.error}`);
+        setEdits((cur) => {
+          if (p.state === 'stopped') return cur.filter((e) => e.id !== p.id);
+          const idx = cur.findIndex((e) => e.id === p.id);
+          // Only 'started' adds a row. A 'saved'/'error' for an unknown id
+          // means the session was already stopped (e.g. a late upload finished
+          // after the user hit ✕) — ignore it so a dead row can't reappear.
+          if (idx === -1 && p.state !== 'started') return cur;
+          const row: EditRow = {
+            id: p.id,
+            remotePath: p.remotePath,
+            status: p.state === 'saved' ? 'saved' : p.state === 'error' ? 'error' : 'editing',
+            error: p.error,
+            at: p.state === 'saved' || p.state === 'error' ? Date.now() : undefined,
+          };
+          if (idx === -1) return [...cur, row];
+          const next = [...cur];
+          next[idx] = row;
+          return next;
+        });
+      },
+    );
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [paneId, showErr]);
+
+  // Revert a transient "saved" badge back to the steady "editing" label
+  // ~2.5 s after the save. Keyed on a derived boolean (not the edits array) so
+  // the interval free-runs while any saved badge is showing, rather than being
+  // torn down and re-armed on every edits mutation (mirrors the transfer strip).
+  const hasSavedBadge = edits.some((e) => e.status === 'saved');
+  useEffect(() => {
+    if (!hasSavedBadge) return;
+    const t = setInterval(() => {
+      setEdits((cur) => {
+        const now = Date.now();
+        let changed = false;
+        const next = cur.map((e) => {
+          if (e.status === 'saved' && (e.at ?? now) < now - 2500) {
+            changed = true;
+            return { ...e, status: 'editing' as const, at: undefined };
+          }
+          return e;
+        });
+        return changed ? next : cur;
+      });
+    }, 500);
+    return () => clearInterval(t);
+  }, [hasSavedBadge]);
+
+  const onEditEntry = (name: string, useEditor: boolean) => {
+    if (!paneId) return;
+    const fn = useEditor ? FileEditOpen : FileOpenWith;
+    void fn(paneId, joinPath(cwd, name)).catch((e) => showErr(String(e)));
+  };
+
+  const stopEdit = (id: string) => {
+    void FileEditStop(id).catch(() => {});
+    setEdits((cur) => cur.filter((e) => e.id !== id));
+  };
+
   // OSC 7 cwd subscription — when "Follow terminal folder" is on, jump to
   // the path emitted by the remote shell. Requires the shell to be
   // configured to emit OSC 7 (modern bash/zsh do this on $PROMPT_COMMAND).
@@ -381,7 +485,9 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
     if (e.isDir) {
       void loadDir(joinPath(cwd, e.name));
     } else {
-      void SftpDownload(paneId!, joinPath(cwd, e.name)).catch((er) => showErr(String(er)));
+      // Open the file for editing (download → text editor → re-upload on
+      // save). Download stays available via the toolbar / right-click.
+      onEditEntry(e.name, true);
     }
   };
 
@@ -724,7 +830,21 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
       ];
     }
     const single = names.length === 1 ? names[0] : null;
+    const singleEntry = single ? entries.find((x) => x.name === single) : null;
+    const isFile = !!singleEntry && !singleEntry.isDir;
     const items: ContextMenuItem[] = [];
+    if (single && isFile) {
+      // Edit downloads to a temp copy, opens it in a text editor, and
+      // re-uploads on save. These lead the menu — the primary file action.
+      items.push({ kind: 'item', label: 'Edit', onClick: () => onEditEntry(single, true) });
+      // Open with… only on Windows, where it shows the native chooser. On
+      // mac/Linux it would just open the default app (no chooser), so it's
+      // hidden there to avoid a misleading "Open with…" that doesn't choose.
+      if (isWindows()) {
+        items.push({ kind: 'item', label: 'Open with…', onClick: () => onEditEntry(single, false) });
+      }
+      items.push({ kind: 'separator' });
+    }
     if (single) {
       items.push({ kind: 'item', label: 'Rename', onClick: () => onRename(single) });
     }
@@ -1264,6 +1384,94 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
             .catch(() => {});
         }}
       />
+
+      {/* Active external edits — files opened in an external app whose saves
+          re-upload to the remote. Each row has a ✕ to stop watching (and
+          remove the temp copy). */}
+      {edits.length > 0 && (
+        <div
+          style={{
+            flex: '0 0 auto',
+            borderTop: `1px solid ${TOKENS.border}`,
+            background: 'rgba(10,14,20,0.32)',
+            maxHeight: 96,
+            overflowY: 'auto',
+          }}
+        >
+          {edits.map((e) => {
+            const fname = e.remotePath.split(/[\\/]/).pop() || e.remotePath;
+            const label =
+              e.status === 'error' ? 'save failed' : e.status === 'saved' ? 'saved ✓' : 'editing';
+            const color =
+              e.status === 'error' ? '#ff9898' : e.status === 'saved' ? TOKENS.accent : TOKENS.info;
+            return (
+              <div
+                key={e.id}
+                style={{
+                  padding: '6px 10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  borderBottom: `1px solid ${TOKENS.border}`,
+                }}
+              >
+                <span style={{ flex: '0 0 auto', color, font: `bold ${FS.base}px/1 ${TOKENS.mono}` }}>
+                  ✎
+                </span>
+                <span
+                  data-tip={e.remotePath}
+                  style={{
+                    flex: '1 1 auto',
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    font: `${FS.base}px/1.2 ${TOKENS.mono}`,
+                    color: TOKENS.fg,
+                  }}
+                >
+                  {fname}
+                </span>
+                <span
+                  style={{
+                    flex: '0 0 auto',
+                    font: `${FS.sm}px/1 ${TOKENS.mono}`,
+                    color,
+                    textTransform: 'uppercase',
+                    letterSpacing: '.04em',
+                  }}
+                >
+                  {label}
+                </span>
+                <button
+                  type="button"
+                  data-tip="Stop editing (remove temp copy)"
+                  onClick={() => stopEdit(e.id)}
+                  style={{
+                    flex: '0 0 auto',
+                    width: 20,
+                    height: 20,
+                    border: 0,
+                    borderRadius: 5,
+                    background: 'transparent',
+                    color: TOKENS.fgDim,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                  onMouseEnter={(ev) => (ev.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
+                  onMouseLeave={(ev) => (ev.currentTarget.style.background = 'transparent')}
+                >
+                  <svg width={ICON.xs} height={ICON.xs} viewBox="0 0 12 12">
+                    <path d="M2 2 L10 10 M10 2 L2 10" stroke="currentColor" strokeWidth="1.4" />
+                  </svg>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Transfer progress strip — one compact row per in-flight or
           recently-finished transfer. Running rows have a cancel ✕;

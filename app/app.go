@@ -10,6 +10,7 @@ import (
 
 	"hopperxterm/credentials"
 	"hopperxterm/events"
+	"hopperxterm/extedit"
 	"hopperxterm/logbook"
 	"hopperxterm/macro"
 	"hopperxterm/pane"
@@ -40,6 +41,7 @@ type App struct {
 	macros     *macro.Store
 	recents    *recent.Store
 	prefs      *prefs.Store
+	extedit    *extedit.Manager
 }
 
 func NewApp() *App {
@@ -105,11 +107,24 @@ func (a *App) startup(ctx context.Context) {
 		pf = prefs.NewInMemory()
 	}
 	a.prefs = pf
+
+	// External-edit manager: reuses the pane manager's synchronous
+	// download/upload, and reads the configured editor from prefs (empty =
+	// OS default text editor).
+	a.extedit = extedit.New(ctx, a.panes, func() string {
+		if v, ok := a.prefs.All()["externalEditor"].(string); ok {
+			return v
+		}
+		return ""
+	})
 }
 
 // shutdown is wired in main.go's options.OnShutdown so panes are closed
 // gracefully when the window exits.
 func (a *App) shutdown(ctx context.Context) {
+	if a.extedit != nil {
+		a.extedit.Shutdown()
+	}
 	if a.panes != nil {
 		_ = a.panes.CloseAll()
 	}
@@ -210,8 +225,14 @@ func (a *App) openPaneIn(paneID, sessionID, dir string) error {
 }
 
 // ClosePane terminates the pane's SSH session and cleans up its goroutines.
-// Idempotent: closing an unknown pane is a no-op.
+// Idempotent: closing an unknown pane is a no-op. Any external-edit sessions
+// bound to the pane are stopped too (their temp copies removed). Reconnect
+// goes through pane.Manager.Close directly, not here, so edits survive a
+// reconnect.
 func (a *App) ClosePane(paneID string) error {
+	if a.extedit != nil {
+		a.extedit.StopForPane(paneID)
+	}
 	return a.panes.Close(paneID)
 }
 
@@ -461,7 +482,51 @@ func (a *App) SftpDownload(paneID, remotePath string) (uint64, error) {
 // frontend's SSH/SFTP/FTP connections (you'd see them piling up in
 // the remote's `who` output).
 func (a *App) ReleaseAllPanes() error {
+	if a.extedit != nil {
+		a.extedit.StopAll()
+	}
 	return a.panes.CloseAll()
+}
+
+// ---- External edit ("open with" / edit remote file) -----------------------
+
+// FileEditOpen downloads the remote file to a local temp copy, opens it in a
+// text editor, and watches the copy — saving re-uploads it to the remote.
+// Returns an edit-session ID; progress / save / error ride the global
+// "extedit:event" channel.
+func (a *App) FileEditOpen(paneID, remotePath string) (string, error) {
+	return a.extedit.Open(paneID, remotePath, true)
+}
+
+// FileOpenWith is FileEditOpen via the OS "open with" path instead of a forced
+// text editor — Windows shows its native chooser; macOS / Linux use the file's
+// default association. The same download → watch → re-upload round-trip runs.
+func (a *App) FileOpenWith(paneID, remotePath string) (string, error) {
+	return a.extedit.Open(paneID, remotePath, false)
+}
+
+// LocalEditOpen opens a local file in a text editor. No temp copy / watcher —
+// the editor edits the file in place. For the dual-pane browser's local side.
+func (a *App) LocalEditOpen(path string) error {
+	return a.extedit.OpenLocal(path, true)
+}
+
+// LocalOpenWith opens a local file via the OS "open with" path (Windows
+// chooser / default association elsewhere), editing in place.
+func (a *App) LocalOpenWith(path string) error {
+	return a.extedit.OpenLocal(path, false)
+}
+
+// FileEditStop ends an external-edit session (stops watching, removes the temp
+// copy). Idempotent.
+func (a *App) FileEditStop(id string) error {
+	return a.extedit.Stop(id)
+}
+
+// FileEditList returns the currently active external-edit sessions, for the
+// frontend's active-edits UI.
+func (a *App) FileEditList() []extedit.Info {
+	return a.extedit.List()
 }
 
 // SaveTextFile prompts the user for a save location via the native

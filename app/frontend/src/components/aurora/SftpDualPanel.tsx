@@ -20,7 +20,11 @@ import type { CSSProperties, ReactNode } from 'react';
 import { ICON, FS, TOKENS } from '../../theme';
 import {
   CancelSftpTransfer,
+  FileEditOpen,
+  FileOpenWith,
   LocalCreate,
+  LocalEditOpen,
+  LocalOpenWith,
   LocalCwd,
   LocalList,
   LocalMkdir,
@@ -42,6 +46,7 @@ import { ConfirmDialog, Modal, Field, TextInput, PrimaryButton, GhostButton, isM
 import { ContextMenu, WithTip } from './primitives';
 import type { ContextMenuItem } from './primitives';
 import { runWithConcurrency } from '../../lib/concurrency';
+import { isWindows } from '../../lib/platform';
 import { type Entry, sortRows, formatSize, formatDate, formatMode, withParentRow, isExec } from '../../lib/fileBrowser';
 import { FileTable, RenameInput, type ColDef } from './FileTable';
 import { EventsOn } from '../../../wailsjs/runtime/runtime';
@@ -441,12 +446,17 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     void loadLocal(localHist.current[localCur.current]);
   };
   const localOnRow = (e: Entry) => {
-    if (!e.isDir) return;
     if (e.name === '..') {
       localNavUp();
       return;
     }
-    void loadLocal(joinPath(localCwd, e.name));
+    if (e.isDir) {
+      void loadLocal(joinPath(localCwd, e.name));
+      return;
+    }
+    // Double-click a local file → open it in a text editor (edits the file
+    // in place — no temp copy, since it's already local).
+    void LocalEditOpen(localJoin(e.name)).catch((er) => setLocalErr(String(er)));
   };
 
   const remoteNavUp = () => void loadRemote(remoteParentDir(remoteCwd));
@@ -463,12 +473,19 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     void loadRemote(remoteHist.current[remoteCur.current]);
   };
   const remoteOnRow = (e: Entry) => {
-    if (!e.isDir) return;
     if (e.name === '..') {
       remoteNavUp();
       return;
     }
-    void loadRemote(joinPath(remoteCwd, e.name));
+    if (e.isDir) {
+      void loadRemote(joinPath(remoteCwd, e.name));
+      return;
+    }
+    // Double-click a remote file → open it for editing (download → text
+    // editor → re-upload on save). Download stays on the toolbar / menu.
+    if (paneId) {
+      void FileEditOpen(paneId, remoteJoin(e.name)).catch((er) => setRemoteErr(String(er)));
+    }
   };
 
   const sortedLocal = useMemo(
@@ -898,7 +915,18 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
       ];
     }
     const single = names.length === 1 ? names[0] : null;
+    const singleEntry = single ? localEntries.find((x) => x.name === single) : null;
+    const isFile = !!singleEntry && !singleEntry.isDir;
     const items: ContextMenuItem[] = [];
+    if (single && isFile) {
+      // Open the local file in place — Edit (text editor). No temp copy: it's
+      // already local. Open with… only on Windows (native chooser).
+      items.push({ kind: 'item', label: 'Edit', onClick: () => void LocalEditOpen(localJoin(single)).catch((e) => setLocalErr(String(e))) });
+      if (isWindows()) {
+        items.push({ kind: 'item', label: 'Open with…', onClick: () => void LocalOpenWith(localJoin(single)).catch((e) => setLocalErr(String(e))) });
+      }
+      items.push({ kind: 'separator' });
+    }
     if (single) {
       items.push({ kind: 'item', label: 'Rename', onClick: () => onLocalRename(single) });
     }
@@ -937,7 +965,29 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
       ];
     }
     const single = names.length === 1 ? names[0] : null;
+    const singleEntry = single ? remoteEntries.find((x) => x.name === single) : null;
+    const isFile = !!singleEntry && !singleEntry.isDir;
     const items: ContextMenuItem[] = [];
+    if (single && isFile && paneId) {
+      // Edit opens a temp copy in a text editor and re-uploads on save. Leads
+      // the menu — the primary file action. Manage / stop active edits from
+      // the Remote Files panel.
+      items.push({
+        kind: 'item',
+        label: 'Edit',
+        onClick: () => void FileEditOpen(paneId, remoteJoin(single)).catch((e) => setRemoteErr(String(e))),
+      });
+      // Open with… only on Windows (native chooser); hidden on mac/Linux where
+      // it would just open the default app with no choice.
+      if (isWindows()) {
+        items.push({
+          kind: 'item',
+          label: 'Open with…',
+          onClick: () => void FileOpenWith(paneId, remoteJoin(single)).catch((e) => setRemoteErr(String(e))),
+        });
+      }
+      items.push({ kind: 'separator' });
+    }
     if (single) {
       items.push({ kind: 'item', label: 'Rename', onClick: () => onRemoteRename(single) });
     }

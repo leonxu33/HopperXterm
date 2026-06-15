@@ -116,6 +116,28 @@ func EmitSftpTransfer(ctx context.Context, paneID string, p SftpTransferPayload)
 	safeEmit(ctx, "sftp:transfer:"+paneID, p)
 }
 
+// ExtEditPayload reports the lifecycle of an "open external / edit
+// remotely" session — a remote file downloaded to a local temp copy,
+// opened in an external app, and re-uploaded whenever the local copy is
+// saved. State progresses started → saved* → stopped, with error
+// interspersed when an upload fails (the temp copy is kept so edits are
+// never lost and the next save retries). This is an app-global event (no
+// paneId in the name): the payload carries PaneID so the frontend can
+// filter to the panel it's showing.
+type ExtEditPayload struct {
+	ID         string `json:"id"`
+	PaneID     string `json:"paneId"`
+	RemotePath string `json:"remotePath"`
+	State      string `json:"state"` // "started" | "saved" | "error" | "stopped"
+	Error      string `json:"error,omitempty"`
+}
+
+// EmitExtEdit emits an external-edit lifecycle update on the global
+// "extedit:event" channel.
+func EmitExtEdit(ctx context.Context, p ExtEditPayload) {
+	safeEmit(ctx, "extedit:event", p)
+}
+
 // ResourceSample is one tick of /proc-derived stats. All fields are
 // optional — frontend treats missing fields as "no change".
 type ResourceSample struct {
