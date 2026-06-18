@@ -212,19 +212,20 @@ func (a *App) ReorderGroup(id, beforeGroupID string) error {
 // output stream over Wails events (pane:state:{paneId},
 // pane:output:{paneId}, connection:log:{paneId}).
 func (a *App) OpenPane(paneID, sessionID string) error {
-	return a.openPaneIn(paneID, sessionID, "", "")
+	return a.openPaneIn(paneID, sessionID, "", "", false)
 }
 
-// OpenPaneInDir is OpenPane with an initial working directory the shell cd's
-// into once ready and a stable tmux token for durable (Persist) sessions.
-// Used by workspace restore to reopen each pane in its saved cwd and re-attach
-// its OWN tmux session; dir == "" behaves like OpenPane, and tmuxID == "" lets
-// a persistent pane mint a fresh token (nothing to restore yet).
+// OpenPaneInDir is OpenPane for workspace restore: it reopens each pane in its
+// saved cwd and re-attaches its OWN tmux session. dir == "" behaves like
+// OpenPane. tmuxID is the durable token saved in the layout — non-empty for a
+// pane that was tmux-backed, "" for one that wasn't; the restore never mints a
+// new token, so a pane comes back exactly as it was saved (the "keep session
+// alive" toggle only governs future opens, not restored panes).
 func (a *App) OpenPaneInDir(paneID, sessionID, dir, tmuxID string) error {
-	return a.openPaneIn(paneID, sessionID, dir, tmuxID)
+	return a.openPaneIn(paneID, sessionID, dir, tmuxID, true)
 }
 
-func (a *App) openPaneIn(paneID, sessionID, dir, tmuxID string) error {
+func (a *App) openPaneIn(paneID, sessionID, dir, tmuxID string, restore bool) error {
 	if paneID == "" || sessionID == "" {
 		return fmt.Errorf("OpenPane: paneId and sessionId required")
 	}
@@ -232,7 +233,7 @@ func (a *App) openPaneIn(paneID, sessionID, dir, tmuxID string) error {
 	if !ok {
 		return fmt.Errorf("OpenPane: session %s not found", sessionID)
 	}
-	return a.panes.OpenInDir(paneID, sess, dir, tmuxID)
+	return a.panes.OpenInDir(paneID, sess, dir, tmuxID, restore)
 }
 
 // GetPaneTmux returns the pane's durable-session token so the frontend can
@@ -284,7 +285,9 @@ func (a *App) ReconnectPane(paneID string) error {
 	}
 	tmuxID, _ := a.panes.TmuxID(paneID)
 	_ = a.panes.Close(paneID)
-	return a.openPaneIn(paneID, sessionID, "", tmuxID)
+	// restore=true: never mint a new token — preserve tmuxID so a persistent
+	// pane re-attaches its existing session and a plain pane stays plain.
+	return a.openPaneIn(paneID, sessionID, "", tmuxID, true)
 }
 
 // SendInput forwards a keystroke (or paste) to the pane's remote PTY.

@@ -34,7 +34,6 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"hopperxterm/events"
-	"hopperxterm/profile"
 	"hopperxterm/transport"
 )
 
@@ -173,16 +172,23 @@ func (p *Pane) resolveTmuxLaunch(client *ssh.Client, name string) (launch string
 // replay it and CloseKill can later kill it. It returns the launch command
 // ("" = plain login shell) and whether the caller should run connect-time init
 // (true for a non-persistent or freshly-created session; false when
-// re-attaching an existing tmux session). The pane's tmuxID is minted here if
-// it wasn't supplied (a fresh pane with no persisted token yet). Logs the
-// outcome — including the silent fall back to Phase A when there's no tmux.
-func (p *Pane) setupPersistence(sess profile.Session, client *ssh.Client) (launch string, runInit bool) {
-	if !sess.Persist {
+// re-attaching an existing tmux session). Logs the outcome — including the
+// silent fall back to Phase A when there's no tmux.
+//
+// Whether the pane is tmux-backed is decided solely by p.tmuxID — the per-pane
+// durable token set in Manager.OpenInDir (minted for a fresh Persist open, or
+// restored from the workspace layout). It is deliberately NOT re-gated on the
+// live Session.Persist flag: a pane that came up on tmux stays on tmux across
+// reconnects and restarts even if the "keep session alive" toggle was flipped
+// off afterwards, so flipping it never silently downgrades a running pane (or
+// orphans its remote session) — the toggle only governs future opens.
+func (p *Pane) setupPersistence(client *ssh.Client) (launch string, runInit bool) {
+	if p.tmuxID == "" {
 		return "", true
 	}
-	// p.tmuxID is minted under m.mu in Manager.OpenInDir before connect, so
-	// it's already set here (and reading it needs no lock — the reaper reads
-	// other panes' tmuxID, never this one's, while this pane connects).
+	// p.tmuxID is set under m.mu in Manager.OpenInDir before connect, so it's
+	// already set here (and reading it needs no lock — the reaper reads other
+	// panes' tmuxID, never this one's, while this pane connects).
 	name := tmuxName(p.appInstanceID, p.tmuxID)
 	l, created, ok := p.resolveTmuxLaunch(client, name)
 	if !ok {

@@ -64,16 +64,24 @@ func (m *Manager) SetWorkspaceTmuxIDs(fn func() []string) { m.extraKeepFn = fn }
 // so the frontend doesn't double-report the error as a banner — the
 // error is already visible in the pane's own output stream.
 func (m *Manager) Open(paneID string, sess profile.Session) error {
-	return m.OpenInDir(paneID, sess, "", "")
+	return m.OpenInDir(paneID, sess, "", "", false)
 }
 
 // OpenInDir is Open with an initial working directory the shell cd's into
 // once ready, and a stable tmux token for durable (Persist) sessions — both
 // used by workspace restore to land a pane back in its saved cwd and re-attach
-// its own tmux session. dir == "" behaves like Open; tmuxID == "" lets a
-// persistent pane mint a fresh token (a brand-new pane with nothing to
-// restore).
-func (m *Manager) OpenInDir(paneID string, sess profile.Session, dir, tmuxID string) error {
+// its own tmux session. dir == "" behaves like Open.
+//
+// restore distinguishes a fresh open (a new tab — false) from a workspace
+// restore (reopening a saved leaf — true), and decides whether the pane is
+// tmux-backed:
+//   - fresh open: mint a durable token iff Session.Persist is on (the live
+//     "keep session alive" toggle), so the toggle governs new tabs.
+//   - restore: NEVER mint — the pane uses tmux iff a token was saved in the
+//     layout (tmuxID != ""), the per-pane snapshot taken when it was opened.
+//     This keeps a restored pane on whatever it was (tmux or plain) regardless
+//     of later toggle changes, which only take effect for future opens.
+func (m *Manager) OpenInDir(paneID string, sess profile.Session, dir, tmuxID string, restore bool) error {
 	m.mu.Lock()
 	if _, exists := m.panes[paneID]; exists {
 		m.mu.Unlock()
@@ -85,8 +93,9 @@ func (m *Manager) OpenInDir(paneID string, sess profile.Session, dir, tmuxID str
 	// Mint the durable-session token HERE, under m.mu, for a fresh persistent
 	// pane — not later in setupPersistence (which runs on the connect goroutine
 	// without the lock), so a sibling pane's reaper reading tmuxID under
-	// m.mu.RLock never races the write.
-	if sess.Persist && p.tmuxID == "" {
+	// m.mu.RLock never races the write. On restore we never mint: a persistent
+	// leaf already carries its saved token, and a plain leaf must stay plain.
+	if sess.Persist && p.tmuxID == "" && !restore {
 		p.tmuxID = mintTmuxID()
 	}
 	p.appInstanceID = m.appInstanceID

@@ -90,7 +90,7 @@ func TestPersist_WrapsAndReattachesOnDrop(t *testing.T) {
 		Host: srv.Host, Port: srv.Port, User: "tester", PemFile: srv.KeyPath,
 		Persist: true,
 	}
-	if err := m.OpenInDir("pane-persist", sess, "", "tok1"); err != nil {
+	if err := m.OpenInDir("pane-persist", sess, "", "tok1", true); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	p, _ := m.get("pane-persist")
@@ -124,6 +124,79 @@ func TestPersist_WrapsAndReattachesOnDrop(t *testing.T) {
 	poll(t, 5*time.Second, func() bool { return countLaunch() >= 2 })
 	if !srv.tmuxHas(wantName) {
 		t.Error("tmux session was destroyed across a drop; it must survive to re-attach")
+	}
+}
+
+// Restore is governed by the SAVED token, not the live Persist flag: a pane
+// that comes back with a tmuxID from the workspace layout stays tmux-backed
+// even though its session's "keep session alive" toggle is now OFF. (Flipping
+// the toggle off must not silently downgrade a restored pane to a plain shell
+// and orphan its remote tmux session.)
+func TestPersist_RestoreUsesSavedTokenWhenPersistOff(t *testing.T) {
+	isolateHome(t)
+	srv := startPaneSSHServer(t)
+	srv.setTmux(true)
+	m := NewManager(context.Background())
+	m.SetAppInstanceID("ti")
+	defer m.CloseAll()
+
+	sess := profile.Session{
+		ID: "ssh-depersisted", Type: profile.SessionSSH, Label: "ssh",
+		Host: srv.Host, Port: srv.Port, User: "tester", PemFile: srv.KeyPath,
+		Persist: false, // toggle was flipped OFF after this pane was first opened
+	}
+	// restore=true with a saved token = the workspace-restore path for a pane
+	// that was tmux-backed when saved.
+	if err := m.OpenInDir("pane-restored", sess, "", "savedtok", true); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	p, _ := m.get("pane-restored")
+	poll(t, 5*time.Second, func() bool { return p.State() == StateConnected })
+
+	wantName := tmuxName("ti", "savedtok")
+	if p.tmuxLaunch == "" || !strings.Contains(p.tmuxLaunch, wantName) {
+		t.Fatalf("restored pane downgraded to plain shell despite saved token: tmuxLaunch=%q", p.tmuxLaunch)
+	}
+	if sc := srv.shellCount(); sc != 0 {
+		t.Errorf("restored pane used a plain shell request %d time(s); want tmux re-attach", sc)
+	}
+}
+
+// Restore NEVER mints a fresh token: a pane saved as non-persistent (no token
+// in the layout) stays a plain shell on restore even though its session's
+// Persist toggle is now ON — the toggle only governs future opens, never
+// retroactively upgrades a restored pane. (Mirror of the downgrade case.)
+func TestPersist_RestoreNeverMintsWhenNoSavedToken(t *testing.T) {
+	isolateHome(t)
+	srv := startPaneSSHServer(t)
+	srv.setTmux(true) // tmux IS available — so a mint would succeed if attempted
+	m := NewManager(context.Background())
+	m.SetAppInstanceID("ti")
+	defer m.CloseAll()
+
+	sess := profile.Session{
+		ID: "ssh-newpersist", Type: profile.SessionSSH, Label: "ssh",
+		Host: srv.Host, Port: srv.Port, User: "tester", PemFile: srv.KeyPath,
+		Persist: true, // toggle flipped ON after this pane was first opened
+	}
+	// restore=true with an empty token = restoring a leaf that was plain.
+	if err := m.OpenInDir("pane-stayplain", sess, "", "", true); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	p, _ := m.get("pane-stayplain")
+	poll(t, 5*time.Second, func() bool { return p.State() == StateConnected })
+
+	if p.tmuxID != "" {
+		t.Errorf("restore minted a token %q; want none", p.tmuxID)
+	}
+	if p.tmuxLaunch != "" {
+		t.Errorf("restore upgraded a plain pane to tmux: tmuxLaunch=%q", p.tmuxLaunch)
+	}
+	poll(t, 3*time.Second, func() bool { return srv.shellCount() >= 1 })
+	for _, c := range srv.execs() {
+		if strings.Contains(c, "new-session -A -s") {
+			t.Errorf("ran a tmux launch on a plain restore: %q", c)
+		}
 	}
 }
 
@@ -174,7 +247,7 @@ func TestPersist_CloseKillEndsSession(t *testing.T) {
 		Host: srv.Host, Port: srv.Port, User: "tester", PemFile: srv.KeyPath,
 		Persist: true,
 	}
-	if err := m.OpenInDir("pane-kill", sess, "", "killtok"); err != nil {
+	if err := m.OpenInDir("pane-kill", sess, "", "killtok", true); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	p, _ := m.get("pane-kill")
@@ -216,7 +289,7 @@ func TestPersist_ManualKillWhileAttachedDisconnects(t *testing.T) {
 		Host: srv.Host, Port: srv.Port, User: "tester", PemFile: srv.KeyPath,
 		Persist: true,
 	}
-	if err := m.OpenInDir("pane-extkill", sess, "", "extkilltok"); err != nil {
+	if err := m.OpenInDir("pane-extkill", sess, "", "extkilltok", true); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	p, _ := m.get("pane-extkill")
@@ -257,7 +330,7 @@ func TestPersist_StableIdReattaches(t *testing.T) {
 		Persist: true,
 	}
 	// First pane creates the session, then detaches (plain Close keeps it).
-	if err := m.OpenInDir("pane-a", sess, "", "shared"); err != nil {
+	if err := m.OpenInDir("pane-a", sess, "", "shared", true); err != nil {
 		t.Fatalf("Open A: %v", err)
 	}
 	pa, _ := m.get("pane-a")
@@ -266,7 +339,7 @@ func TestPersist_StableIdReattaches(t *testing.T) {
 	_ = m.Close("pane-a")
 
 	// A different pane with the SAME token re-attaches the existing session.
-	if err := m.OpenInDir("pane-b", sess, "", "shared"); err != nil {
+	if err := m.OpenInDir("pane-b", sess, "", "shared", true); err != nil {
 		t.Fatalf("Open B: %v", err)
 	}
 	pb, _ := m.get("pane-b")
@@ -306,7 +379,7 @@ func TestPersist_ReapsOrphans(t *testing.T) {
 	}
 	// Opening a persistent pane creates its own (attached) session AND triggers
 	// the reaper on the same host.
-	if err := m.OpenInDir("pane-reap", sess, "", "live"); err != nil {
+	if err := m.OpenInDir("pane-reap", sess, "", "live", true); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	p, _ := m.get("pane-reap")

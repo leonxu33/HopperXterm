@@ -279,7 +279,7 @@ func (p *Pane) connectSSHLike(sess profile.Session) error {
 	// tmux so it survives drops/restarts. launch == "" → plain login shell
 	// (non-persistent, or tmux unavailable → Phase-A fallback). runInit is
 	// false only when re-attaching an existing tmux session (already set up).
-	launch, runInit := p.setupPersistence(sess, client)
+	launch, runInit := p.setupPersistence(client)
 
 	shell, err := transport.StartShellCmd(client, launch)
 	if err != nil {
