@@ -366,6 +366,16 @@ func (a *App) GetPaneOSFamily(paneID string) (string, error) {
 	return a.panes.OSFamily(paneID)
 }
 
+// GetPaneHostInfo returns the pane's cached host-identity probe result
+// (OS name/version, kernel, arch, hostname, family). The status bar pulls
+// this on mount to seed the host label even when it subscribed after the
+// one-shot pane:hostinfo event already fired (e.g. switching to a tab that
+// connected earlier) — the same seed-then-subscribe pattern the Remote
+// Files panel uses with GetPaneOSFamily. Zero value until the probe lands.
+func (a *App) GetPaneHostInfo(paneID string) (events.HostInfo, error) {
+	return a.panes.HostInfo(paneID)
+}
+
 // InstallOsc7Hook writes a bash/zsh-aware OSC 7 emitter into the
 // pane's PTY so future prompt redraws emit OSC 7. Called by the SFTP
 // panel's "Follow terminal folder" toggle on activation so the

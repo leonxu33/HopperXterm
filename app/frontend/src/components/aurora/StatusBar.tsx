@@ -7,6 +7,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { FS, TOKENS } from '../../theme';
 import { netMbps } from '../../lib/format';
 import { hostKeyFor, useResourceMonitor } from './ResourcePanel';
+import { GetPaneHostInfo } from '../../../wailsjs/go/main/App';
 import { EventsOn } from '../../../wailsjs/runtime/runtime';
 import { ContextMenu, Tooltip, type ContextMenuItem, type TooltipRow } from './primitives';
 
@@ -43,11 +44,30 @@ function useHostInfo(paneId: string | null, hostKey: string | null): HostInfo | 
     const sub = () => setVersion((v) => v + 1);
     entry.subs.add(sub);
     sub();
+    let cancelled = false;
+    // pane:hostinfo is a one-shot event fired right after the probe. If this
+    // status bar subscribes after it fired (e.g. switching to a tab that
+    // connected earlier), the event is gone — so seed from the backend's
+    // cached probe result, the same way SftpPanel seeds via GetPaneOSFamily.
+    // Only fill an empty entry so we never clobber a fresher live event.
+    void GetPaneHostInfo(paneId)
+      .then((info) => {
+        if (cancelled || !info) return;
+        const cur = entry.info;
+        if (cur && (cur.hostname || cur.name || cur.kernel || cur.arch)) return;
+        if (!(info.hostname || info.name || info.kernel || info.arch || info.family)) return;
+        entry.info = info;
+        for (const s of entry.subs) s();
+      })
+      .catch(() => {
+        /* pane closed / not SSH — nothing to seed */
+      });
     const off = EventsOn(`pane:hostinfo:${paneId}`, (info: HostInfo) => {
       entry.info = info || {};
       for (const s of entry.subs) s();
     });
     return () => {
+      cancelled = true;
       entry.subs.delete(sub);
       off();
     };

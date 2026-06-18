@@ -142,6 +142,14 @@ type Pane struct {
 	osFamilyMu sync.Mutex
 	osFamily   string
 
+	// hostInfo caches the last probe result so a consumer that mounts AFTER
+	// the one-shot pane:hostinfo event already fired (e.g. the status bar
+	// when switching to a tab that connected earlier) can still pull it via
+	// GetPaneHostInfo — the same seed-then-subscribe pattern the SFTP panel
+	// uses for the OS family. Empty until the probe goroutine completes.
+	hostInfoMu sync.Mutex
+	hostInfo   events.HostInfo
+
 	// Number of times prompt() has been invoked during this pane's
 	// auth phase. Used to detect retries (count > 1) so the second and
 	// subsequent prompts can show a "permission denied" message instead
@@ -355,14 +363,18 @@ func (p *Pane) probeHostInfo(client *ssh.Client) {
 	if info == (transport.HostOSInfo{}) {
 		return
 	}
-	events.EmitHostInfo(p.appCtx, p.ID, events.HostInfo{
+	hi := events.HostInfo{
 		Name:     info.Name,
 		Version:  info.Version,
 		Kernel:   info.Kernel,
 		Arch:     info.Arch,
 		Hostname: info.Hostname,
 		Family:   info.Family,
-	})
+	}
+	// Cache before emitting so a late-mounting status bar can pull it even
+	// if it subscribes after this one-shot event fires.
+	p.cacheHostInfo(hi)
+	events.EmitHostInfo(p.appCtx, p.ID, hi)
 }
 
 func (p *Pane) connectLocalShell(sess profile.Session) error {
@@ -1063,6 +1075,22 @@ func (p *Pane) cacheOSFamily(fam string) {
 	p.osFamilyMu.Lock()
 	defer p.osFamilyMu.Unlock()
 	p.osFamily = fam
+}
+
+// cachedHostInfo returns the last probe result, or the zero value if the
+// probe hasn't completed (or returned nothing).
+func (p *Pane) cachedHostInfo() events.HostInfo {
+	p.hostInfoMu.Lock()
+	defer p.hostInfoMu.Unlock()
+	return p.hostInfo
+}
+
+// cacheHostInfo records the probe result so a consumer can pull it after the
+// one-shot pane:hostinfo event has already fired.
+func (p *Pane) cacheHostInfo(hi events.HostInfo) {
+	p.hostInfoMu.Lock()
+	defer p.hostInfoMu.Unlock()
+	p.hostInfo = hi
 }
 
 // InstallOsc7Hook writes a shell snippet into the PTY that:

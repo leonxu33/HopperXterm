@@ -244,6 +244,16 @@ func (m *Manager) OSFamily(paneID string) (string, error) {
 	return p.cachedOSFamily(), nil
 }
 
+// HostInfo returns the pane's cached host-identity probe result, or the zero
+// value if the pane isn't found or the probe hasn't landed yet.
+func (m *Manager) HostInfo(paneID string) (events.HostInfo, error) {
+	p, ok := m.get(paneID)
+	if !ok {
+		return events.HostInfo{}, errors.New("pane: not found")
+	}
+	return p.cachedHostInfo(), nil
+}
+
 // InstallOsc7Hook injects an OSC 7 emitter into the pane's shell so
 // future prompt redraws emit a cwd that the readLoop can detect.
 func (m *Manager) InstallOsc7Hook(paneID string) error {
