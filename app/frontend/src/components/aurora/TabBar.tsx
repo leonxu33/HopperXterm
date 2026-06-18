@@ -71,6 +71,11 @@ export function TabBar({
 }: Props) {
   const tabHasTemp = (t: Tab) => !!tempTabIds && tempTabIds.has(t.id);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
+  // Identity of the tab being dragged, used to detect when it leaves this bar
+  // (e.g. dropped onto another workspace's row, which retags + unmounts it).
+  // The per-tab onDragEnd can be missed when the source unmounts mid-drag, so
+  // an effect below clears the stale drag state by id instead.
+  const dragIdRef = useRef<string | null>(null);
   const [dropAt, setDropAt] = useState<{ idx: number; side: Side } | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   // True while a pane is being dragged over the tab bar (shows the detach hint).
@@ -94,7 +99,19 @@ export function TabBar({
     setDropAt(null);
     setPaneDropOver(false);
     tabMeasureRef.current = null;
+    dragIdRef.current = null;
   };
+
+  // Self-heal stale drag state: if the dragged tab is no longer in this bar
+  // (moved to another workspace, closed, etc.), clear it so the tab that now
+  // sits at the old dragIdx isn't left rendered as the faded "dragging" one.
+  useEffect(() => {
+    if (dragIdx === null) return;
+    if (!dragIdRef.current || !tabs.some((t) => t.id === dragIdRef.current)) {
+      clearDrag();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs, dragIdx]);
 
   return (
     <div
@@ -238,6 +255,7 @@ export function TabBar({
               onDragStart={(e) => {
                 if (renaming) return;
                 setDragIdx(i);
+                dragIdRef.current = t.id;
                 try {
                   e.dataTransfer.setData('application/x-hopper-tab', t.id);
                   e.dataTransfer.setData('text/plain', `tab:${t.id}`);

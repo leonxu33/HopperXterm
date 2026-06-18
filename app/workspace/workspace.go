@@ -37,6 +37,10 @@ type Tab struct {
 //
 // Legacy records saved before IDs existed have ID=="" on disk; load() backfills
 // ID=Name for them (names were unique under the old name-keyed upsert).
+// Inactive marks a workspace dormant: it's greyed out and unopenable in the UI
+// and is skipped on startup restore. Stored inverted (default-active) so legacy
+// records — which lack the field — unmarshal to false == active, and omitempty
+// keeps active workspaces' JSON unchanged.
 type Workspace struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -45,6 +49,7 @@ type Workspace struct {
 	Icon        string `json:"icon,omitempty"`
 	Color       string `json:"color,omitempty"`
 	Description string `json:"description,omitempty"`
+	Inactive    bool   `json:"inactive,omitempty"`
 }
 
 // Store keeps the workspaces collection on disk under a directory.

@@ -15,7 +15,8 @@ import {
 
 // Presentation metadata for a workspace. All optional; empty values round-trip
 // as absent. `name` carries a rename when edited via WorkspaceAppearanceModal.
-export type WsMeta = { name?: string; icon?: string; color?: string; description?: string };
+// `active` toggles the workspace's live/dormant state (default active).
+export type WsMeta = { name?: string; icon?: string; color?: string; description?: string; active?: boolean };
 
 export function WorkspaceAppearanceModal({
   name,
@@ -32,6 +33,7 @@ export function WorkspaceAppearanceModal({
   const [icon, setIcon] = useState<string>(initial.icon || DEFAULT_WORKSPACE_ICON);
   const [color, setColor] = useState<string>(initial.color || FOLDER_COLORS[0]);
   const [description, setDescription] = useState<string>(initial.description ?? '');
+  const [active, setActive] = useState<boolean>(initial.active !== false);
 
   const submit = () =>
     onSubmit({
@@ -39,6 +41,7 @@ export function WorkspaceAppearanceModal({
       icon,
       color,
       description: description.trim() || undefined,
+      active,
     });
 
   return (
@@ -58,6 +61,53 @@ export function WorkspaceAppearanceModal({
     >
       <Field label="Name">
         <TextInput value={wsName} onChange={(v) => setWsName(sanitizeLabel(v))} placeholder="prod-deploy" autoFocus />
+      </Field>
+      <Field label="Status" plain>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={active}
+          onClick={() => setActive((v) => !v)}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: 0,
+            border: 0,
+            background: 'transparent',
+            cursor: 'pointer',
+          }}
+        >
+          <span
+            style={{
+              position: 'relative',
+              width: 38,
+              height: 22,
+              borderRadius: 11,
+              flex: '0 0 auto',
+              background: active ? TOKENS.accent : 'rgba(255,255,255,0.14)',
+              boxShadow: active ? 'none' : `inset 0 0 0 1px ${TOKENS.border}`,
+              transition: 'background .15s',
+            }}
+          >
+            <span
+              style={{
+                position: 'absolute',
+                top: 2,
+                left: 2,
+                width: 18,
+                height: 18,
+                borderRadius: '50%',
+                background: active ? '#06120e' : TOKENS.fgDim,
+                transform: active ? 'translateX(16px)' : 'translateX(0)',
+                transition: 'transform .15s, background .15s',
+              }}
+            />
+          </span>
+          <span style={{ font: `540 ${FS.base}px/1 ${TOKENS.font}`, color: active ? TOKENS.accent : TOKENS.fgDim }}>
+            {active ? 'Active' : 'Inactive'}
+          </span>
+        </button>
       </Field>
       <WorkspaceAppearanceFields
         icon={icon}

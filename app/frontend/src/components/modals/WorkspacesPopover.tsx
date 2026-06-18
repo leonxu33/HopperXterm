@@ -20,6 +20,7 @@ type WsEntry = {
   icon?: string;
   color?: string;
   description?: string;
+  inactive?: boolean;
 };
 
 type Props = {
@@ -105,22 +106,28 @@ export function WorkspacesPopover({
       ) : (
         workspaces.map((ws) => {
           const active = ws.id === activeId;
+          const inactive = !!ws.inactive;
           const activeBg = `linear-gradient(90deg, ${TOKENS.accentDim}, rgba(125,240,196,0.02))`;
           return (
           <div
             key={ws.id}
             style={{
               ...rowStyle,
+              opacity: inactive ? 0.45 : 1,
+              cursor: inactive ? 'default' : 'pointer',
               background: active ? activeBg : 'transparent',
               boxShadow: active ? `inset 0 0 0 1px ${TOKENS.accentSoft}` : 'none',
             }}
+            data-tip={inactive ? 'Inactive — edit to reactivate' : undefined}
             onMouseEnter={(e) => {
-              if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+              if (!active && !inactive) e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.background = active ? activeBg : 'transparent';
             }}
-            onClick={() => onSwitch(ws.id)}
+            onClick={() => {
+              if (!inactive) onSwitch(ws.id);
+            }}
           >
             <WorkspaceGlyph icon={ws.icon} color={ws.color} size={ICON.md} />
             <div style={{ flex: 1, minWidth: 0 }}>

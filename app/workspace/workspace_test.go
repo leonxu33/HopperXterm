@@ -77,6 +77,34 @@ func TestStore_RoundTrip(t *testing.T) {
 	}
 }
 
+// Inactive round-trips through disk; default-active means a freshly built
+// workspace (and legacy records) come back Inactive==false.
+func TestStore_InactiveRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	w := makeWS("dormant", "s1")
+	w.Inactive = true
+	if err := s.Save(w); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	s2, _ := Open(dir)
+	got, err := s2.Get("dormant")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.Inactive {
+		t.Errorf("Inactive not persisted: %+v", got)
+	}
+	// A plain workspace defaults to active.
+	active := makeWS("live", "s1")
+	if err := s.Save(active); err != nil {
+		t.Fatalf("Save active: %v", err)
+	}
+	if g, _ := s.Get("live"); g.Inactive {
+		t.Errorf("fresh workspace should default to active, got Inactive=true")
+	}
+}
+
 func TestSave_IDRequired(t *testing.T) {
 	s, _ := Open(t.TempDir())
 	if err := s.Save(Workspace{Name: "noid"}); err == nil {

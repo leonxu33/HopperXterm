@@ -141,6 +141,8 @@ type WorkspaceSnapshot = {
   icon?: string;
   color?: string;
   description?: string;
+  /** Dormant workspace — greyed out, unopenable, skipped on startup. */
+  inactive?: boolean;
 };
 
 // Ordered MRU of opened targets, surfaced by the "+" tab menu. Persisted
@@ -245,6 +247,10 @@ function App() {
   }, [activeWorkspaceId]);
   const instantiatedRef = useRef<Set<string>>(new Set());
   const activeTabByWsRef = useRef<Record<string, string | null>>({});
+  // Non-active, instantiated workspaces awaiting a snapshot save (e.g. after a
+  // tab is dragged into one). Flushed by the debounced autosave effect, which
+  // re-runs on the same `tabs` change that enqueued them — so it sees fresh state.
+  const pendingWorkspaceSaves = useRef<Set<string>>(new Set());
   // Remember the active tab per workspace so switching back restores it.
   useEffect(() => {
     if (activeWorkspaceId) activeTabByWsRef.current[activeWorkspaceId] = activeTabId;
@@ -1447,20 +1453,22 @@ function App() {
   };
 
   // ─── Workspaces ──────────────────────────────────────────────────────
-  // Workspaces only persist shell-type (terminal) sessions. File-only
-  // panes (SFTP / FTP / S3) are dropped from the snapshot: they're browse
-  // sessions, not a layout worth restoring, and restoring them auto-opened
-  // file panels that the user rarely wanted back. Columns/tabs left empty
-  // after filtering are pruned.
+  // Workspaces persist every saved-session pane — shell (terminal) AND
+  // file-only (SFTP / FTP / S3) — so a restored workspace comes back exactly
+  // as it was left. Only transient (quick-connect) panes are excluded; tabs
+  // left empty after filtering are pruned.
   const isShellSession = (sessionId: string) => {
     const s = snap.sessions.find((x) => x.id === sessionId);
     return !!s && !isFileOnly(s.type);
   };
+  // A pane references a real saved session (vs. a transient/quick-connect or
+  // stale id). Transient tabs are already excluded at the tab level below, but
+  // this also drops any stray orphan leaf from the persisted layout.
+  const isKnownSession = (sessionId: string) => snap.sessions.some((x) => x.id === sessionId);
   // Build a fresh snapshot of one workspace from its current live tabs.
-  // Excludes transient (quick-connect) and file-only panes — workspaces only
-  // persist real shell sessions. Captures each shell pane's OSC 7 cwd so a
-  // later instantiation cd's the pane back; panes that never reported a cwd
-  // are simply absent. Returns null for an unknown workspace id.
+  // Excludes transient (quick-connect) panes. Captures each shell pane's OSC 7
+  // cwd so a later instantiation cd's the pane back (file panes have no OSC 7
+  // cwd — the capture simply skips them). Returns null for an unknown id.
   const snapshotWorkspace = async (wsId: string): Promise<WorkspaceSnapshot | null> => {
     const meta = workspaces.find((w) => w.id === wsId);
     if (!meta) return null;
@@ -1482,8 +1490,8 @@ function App() {
     );
     const outTabs: WorkspaceTab[] = [];
     for (const t of wsTabs) {
-      const shellLayout = filterLeaves(t.layout, (leaf) => isShellSession(leaf.sessionId));
-      if (shellLayout) outTabs.push({ label: t.label, layout: toWsNode(shellLayout, (id) => cwds.get(id)) });
+      const layout = filterLeaves(t.layout, (leaf) => isKnownSession(leaf.sessionId));
+      if (layout) outTabs.push({ label: t.label, layout: toWsNode(layout, (id) => cwds.get(id)) });
     }
     return {
       id: meta.id,
@@ -1493,26 +1501,37 @@ function App() {
       icon: meta.icon,
       color: meta.color,
       description: meta.description,
+      inactive: meta.inactive,
     };
   };
 
-  // Persist the active workspace (driven by the debounced effect below).
-  // Skips until the workspace is fully instantiated, so the switch race
+  // Persist one instantiated workspace's current live layout to disk. Skips
+  // until the workspace is fully instantiated, so the switch race
   // (activeWorkspaceId set before its tabs exist) can't clobber disk with an
-  // empty layout.
-  const autosaveActiveWorkspace = async () => {
-    const wsId = activeWorkspaceIdRef.current;
+  // empty layout. Only tabs/updatedAt are merged into the in-memory list —
+  // name/icon/inactive are owned by saveWorkspaceAppearance.
+  const saveWorkspaceById = async (wsId: string) => {
     if (!wsId || !instantiatedRef.current.has(wsId)) return;
     const snapshot = await snapshotWorkspace(wsId);
     if (!snapshot) return;
     try {
       await SaveWorkspace(snapshot as any);
-      // Keep the in-memory list's tabs/updatedAt fresh (rail tab counts).
       setWorkspaces((cur) =>
         cur.map((w) => (w.id === wsId ? { ...w, tabs: snapshot.tabs, updatedAt: snapshot.updatedAt } : w)),
       );
     } catch (e) {
       setErr(String(e));
+    }
+  };
+
+  // Save the active workspace plus any workspaces queued in pendingWorkspaceSaves
+  // (non-active ones a tab was just moved into). Driven by the debounced effect.
+  const flushWorkspaceSaves = async () => {
+    await saveWorkspaceById(activeWorkspaceIdRef.current);
+    const pending = Array.from(pendingWorkspaceSaves.current);
+    pendingWorkspaceSaves.current.clear();
+    for (const id of pending) {
+      if (id !== activeWorkspaceIdRef.current) await saveWorkspaceById(id);
     }
   };
 
@@ -1549,6 +1568,7 @@ function App() {
         label: wt.label || ws.name,
         state: 'Connecting',
         layout,
+        isFileTab: isFileOnly(sourceSession?.type),
       });
       if (firstCell) newActiveByTab[tabId] = firstCell.id;
     }
@@ -1571,6 +1591,8 @@ function App() {
   // switch is instant and connections stay up.
   const switchWorkspace = async (wsId: string) => {
     if (!wsId || wsId === activeWorkspaceIdRef.current) return;
+    // Inactive workspaces are dormant — not openable until reactivated.
+    if (workspaces.find((w) => w.id === wsId)?.inactive) return;
     setManageWorkspacesOpen(false);
     setPaletteOpen(false);
     let wsTabIds: string[];
@@ -1585,8 +1607,6 @@ function App() {
     const remembered = activeTabByWsRef.current[wsId];
     setActiveTabId(remembered && wsTabIds.includes(remembered) ? remembered : wsTabIds[0] ?? null);
     setPref(PREF_ACTIVE_WORKSPACE, wsId);
-    const name = workspaces.find((w) => w.id === wsId)?.name;
-    if (name) pushRecent({ kind: 'workspace', name });
   };
 
   // Resolve a workspace name to its id (first match) and switch. Used by the
@@ -1629,44 +1649,35 @@ function App() {
   };
 
   // Open the appearance/rename editor for a workspace (by id), prefilled from
-  // the in-memory list.
+  // the in-memory list. The permanent default workspace can't be edited.
   const onEditWorkspaceAppearance = (wsId: string) => {
+    if (wsId === DEFAULT_WORKSPACE_ID) return;
     const ws = workspaces.find((w) => w.id === wsId);
     if (!ws) return;
     setAppearanceEdit({
       id: ws.id,
       name: ws.name,
-      initial: { name: ws.name, icon: ws.icon, color: ws.color, description: ws.description },
+      initial: {
+        name: ws.name,
+        icon: ws.icon,
+        color: ws.color,
+        description: ws.description,
+        active: !ws.inactive,
+      },
     });
   };
 
-  // Persist edited name/appearance (layout untouched): merge into the live
-  // snapshot and upsert by id.
-  const saveWorkspaceAppearance = async (wsId: string, meta: WsMeta) => {
-    setAppearanceEdit(null);
-    const ws = workspaces.find((w) => w.id === wsId);
-    if (!ws) return;
-    const name = (meta.name ?? ws.name).trim() || ws.name;
-    const updated: WorkspaceSnapshot = {
-      ...ws,
-      name,
-      icon: meta.icon,
-      color: meta.color,
-      description: meta.description,
-      updatedAt: Date.now(),
-    };
-    try {
-      await SaveWorkspace(updated as any);
-      setWorkspaces((cur) => cur.map((w) => (w.id === wsId ? updated : w)));
-    } catch (e) {
-      setErr(String(e));
-    }
-  };
-
-  // Delete a workspace: tear down its live panes, drop its tabs, remove it
-  // from the store, and fall back to the default workspace if it was active.
-  const performDeleteWorkspace = async (wsId: string) => {
-    if (wsId === DEFAULT_WORKSPACE_ID) return; // the home workspace is permanent
+  // Tear down a workspace's live panes and drop its tabs (connections closed).
+  // Shared by delete and deactivate. Does NOT remove the workspace record.
+  const teardownWorkspaceTabs = async (wsId: string) => {
+    // Drop bookkeeping FIRST, before the (awaited) ClosePane loop — once it's
+    // out of instantiatedRef, any debounced flushWorkspaceSaves that fires
+    // mid-teardown skips it (saveWorkspaceById guards on instantiatedRef), so a
+    // stale snapshot can't re-save the workspace and clobber a just-set inactive
+    // flag. Also drop any queued save for it.
+    instantiatedRef.current.delete(wsId);
+    pendingWorkspaceSaves.current.delete(wsId);
+    delete activeTabByWsRef.current[wsId];
     for (const t of tabs.filter((t) => t.workspaceId === wsId)) {
       for (const leaf of paneLeaves(t.layout)) {
         try {
@@ -1677,8 +1688,47 @@ function App() {
       }
     }
     setTabs((cur) => cur.filter((t) => t.workspaceId !== wsId));
-    instantiatedRef.current.delete(wsId);
-    delete activeTabByWsRef.current[wsId];
+  };
+
+  // Persist edited name/appearance/status (layout untouched): merge into the
+  // live snapshot and upsert by id. Deactivating tears down the workspace's
+  // live tabs immediately and falls back to the default if it was active. The
+  // permanent default workspace can't be edited.
+  const saveWorkspaceAppearance = async (wsId: string, meta: WsMeta) => {
+    setAppearanceEdit(null);
+    if (wsId === DEFAULT_WORKSPACE_ID) return;
+    const ws = workspaces.find((w) => w.id === wsId);
+    if (!ws) return;
+    const name = (meta.name ?? ws.name).trim() || ws.name;
+    const inactive = meta.active === false;
+    const updated: WorkspaceSnapshot = {
+      ...ws,
+      name,
+      icon: meta.icon,
+      color: meta.color,
+      description: meta.description,
+      inactive,
+      updatedAt: Date.now(),
+    };
+    try {
+      await SaveWorkspace(updated as any);
+      setWorkspaces((cur) => cur.map((w) => (w.id === wsId ? updated : w)));
+    } catch (e) {
+      setErr(String(e));
+      return;
+    }
+    // Newly inactive → make it truly dormant: close its connections now.
+    if (inactive && !ws.inactive) {
+      await teardownWorkspaceTabs(wsId);
+      if (activeWorkspaceIdRef.current === wsId) void switchWorkspace(DEFAULT_WORKSPACE_ID);
+    }
+  };
+
+  // Delete a workspace: tear down its live panes, drop its tabs, remove it
+  // from the store, and fall back to the default workspace if it was active.
+  const performDeleteWorkspace = async (wsId: string) => {
+    if (wsId === DEFAULT_WORKSPACE_ID) return; // the home workspace is permanent
+    await teardownWorkspaceTabs(wsId);
     try {
       await DeleteWorkspace(wsId);
     } catch (e) {
@@ -1691,6 +1741,36 @@ function App() {
       // one — so switchWorkspace's same-id guard won't short-circuit).
       void switchWorkspace(DEFAULT_WORKSPACE_ID);
     }
+  };
+
+  // Reload every live tab in a workspace (right-click → "Reload all tabs").
+  // No-op for a non-instantiated workspace — it has no live tabs to reload.
+  const reloadWorkspaceTabs = (wsId: string) => {
+    if (!instantiatedRef.current.has(wsId)) return;
+    for (const t of tabs.filter((t) => t.workspaceId === wsId)) void reloadTab(t.id);
+  };
+
+  // Move a tab into another workspace (drag a tab onto a workspace row). The
+  // tab's live panes are untouched (pane ids are stable) — only its
+  // workspaceId tag changes. The target is instantiated first if it wasn't, so
+  // its saved tabs are already live and a later switch won't re-load + duplicate
+  // them. Source autosaves via the tabs-change effect; the target is queued.
+  const moveTabToWorkspace = async (tabId: string, targetWsId: string) => {
+    const tab = tabs.find((t) => t.id === tabId);
+    if (!tab || tab.workspaceId === targetWsId) return;
+    if (workspaces.find((w) => w.id === targetWsId)?.inactive) return;
+    const sourceWsId = tab.workspaceId;
+    if (!instantiatedRef.current.has(targetWsId)) {
+      await instantiateWorkspace(targetWsId);
+    }
+    setTabs((cur) => cur.map((t) => (t.id === tabId ? { ...t, workspaceId: targetWsId } : t)));
+    // If the moved tab was the active (visible) tab of the source workspace,
+    // pick a new active tab from what remains there.
+    if (activeWorkspaceIdRef.current === sourceWsId && activeTabId === tabId) {
+      const remaining = tabs.filter((t) => t.workspaceId === sourceWsId && t.id !== tabId);
+      setActiveTabId(remaining[0]?.id ?? null);
+    }
+    pendingWorkspaceSaves.current.add(targetWsId);
   };
 
   const onDeleteWorkspace = (wsId: string) => {
@@ -1726,7 +1806,7 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!activeWorkspaceId || !instantiatedRef.current.has(activeWorkspaceId)) return;
-    const h = setTimeout(() => void autosaveActiveWorkspace(), 600);
+    const h = setTimeout(() => void flushWorkspaceSaves(), 600);
     return () => clearTimeout(h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabs, activeWorkspaceId]);
@@ -1762,18 +1842,19 @@ function App() {
         }
         if (cancelled) return;
         list = [def, ...list];
-      } else if (!existingDefault.icon || existingDefault.icon === 'bookmark') {
-        // Upgrade a pre-home default to the reserved house glyph. 'bookmark'
-        // was the old hardcoded default icon and was never user-selectable for
-        // the default, so replacing it can't clobber a deliberate choice.
-        const upgraded: WorkspaceSnapshot = { ...existingDefault, icon: HOME_WORKSPACE_ICON };
+      } else if (existingDefault.name !== 'Default' || existingDefault.icon !== HOME_WORKSPACE_ICON) {
+        // The default workspace's name + icon are reserved and not user-editable.
+        // Enforce them on launch so any stale value (e.g. an override saved by an
+        // older build that allowed editing the default) is restored — and so the
+        // default can never drift from its house glyph / "Default" name.
+        const restored: WorkspaceSnapshot = { ...existingDefault, name: 'Default', icon: HOME_WORKSPACE_ICON };
         try {
-          await SaveWorkspace(upgraded as any);
+          await SaveWorkspace(restored as any);
         } catch (e) {
           setErr(String(e));
         }
         if (cancelled) return;
-        list = list.map((w) => (w.id === DEFAULT_WORKSPACE_ID ? upgraded : w));
+        list = list.map((w) => (w.id === DEFAULT_WORKSPACE_ID ? restored : w));
       }
       setWorkspaces(list);
       let savedActive = '';
@@ -1784,8 +1865,10 @@ function App() {
         /* prefs unavailable — fall through to the default */
       }
       if (cancelled) return;
-      const targetId =
-        savedActive && list.some((w) => w.id === savedActive) ? savedActive : DEFAULT_WORKSPACE_ID;
+      // Restore the saved-active workspace unless it's gone or now inactive
+      // (dormant workspaces aren't reopened on startup) — fall back to default.
+      const savedWs = savedActive ? list.find((w) => w.id === savedActive) : undefined;
+      const targetId = savedWs && !savedWs.inactive ? savedActive : DEFAULT_WORKSPACE_ID;
       void switchWorkspace(targetId);
     })();
     return () => {
@@ -2165,6 +2248,7 @@ function App() {
           icon: w.icon,
           color: w.color,
           description: w.description,
+          inactive: w.inactive,
         }))
         // Pin the permanent default first; keep the rest in store (name) order.
         .sort((a, b) =>
@@ -2203,20 +2287,13 @@ function App() {
           sub: 'Quick connect',
           cmd: r.cmd,
         });
-      } else {
-        const ws = workspaces.find((w) => w.name === r.name);
-        if (!ws) continue;
-        const n = ws.tabs?.length ?? 0;
-        out.push({
-          key: recentKey(r),
-          kind: 'workspace',
-          label: ws.name,
-          sub: `Workspace · ${n} tab${n === 1 ? '' : 's'}`,
-        });
       }
+      // Workspaces are intentionally excluded from recents — they live in the
+      // Workspaces sidebar / switcher, not the new-tab recents list. Any stale
+      // 'workspace' refs from older builds are skipped.
     }
     return out;
-  }, [recents, snap.sessions, workspaces]);
+  }, [recents, snap.sessions]);
 
   const onPickRecent = (item: RecentItem) => {
     if (item.kind === 'session') {
@@ -2226,10 +2303,9 @@ function App() {
       const parsed = parseQuickConnect(item.cmd ?? '');
       if (parsed.ok) void openTransientSession(parsed.draft);
       else setErr('Could not parse quick-connect command.');
-    } else {
-      const name = item.key.slice('workspace:'.length);
-      switchWorkspaceByName(name);
     }
+    // No 'workspace' branch: workspaces are excluded from recents (they live in
+    // the Workspaces sidebar / switcher), so recentTabItems never emits one.
   };
 
   // ─── Tab aggregate state ─────────────────────────────────────────────
@@ -2567,7 +2643,10 @@ function App() {
                         onSwitch={(id) => void switchWorkspace(id)}
                         onDelete={onDeleteWorkspace}
                         onEditAppearance={onEditWorkspaceAppearance}
+                        onReloadAll={reloadWorkspaceTabs}
                         onNewWorkspace={() => void newWorkspace()}
+                        onRefresh={() => void refreshWorkspaces()}
+                        onMoveTabHere={(tabId, wsId) => void moveTabToWorkspace(tabId, wsId)}
                         onCollapse={() => setSidebarCollapsed(true)}
                       />
                     ) : (
@@ -2930,7 +3009,7 @@ function App() {
                   );
                 })}
                 {activeWorkspaceTabs.length === 0 && (
-                  <div style={{ position: 'absolute', inset: 0 }}>
+                  <div style={{ position: 'absolute', inset: 0, display: 'flex' }}>
                     <EmptyState items={recentTabItems} onPick={onPickRecent} />
                   </div>
                 )}
