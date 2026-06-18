@@ -8,13 +8,13 @@ func TestStore_Reload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s1.Save(Workspace{Name: "w1"}); err != nil {
+	if err := s1.Save(Workspace{ID: "w1", Name: "w1"}); err != nil {
 		t.Fatal(err)
 	}
 
 	s2, _ := Open(dir)
 	_ = s2.Delete("w1")
-	if err := s2.Save(Workspace{Name: "w2"}); err != nil {
+	if err := s2.Save(Workspace{ID: "w2", Name: "w2"}); err != nil {
 		t.Fatal(err)
 	}
 

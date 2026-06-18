@@ -23,6 +23,9 @@ export const PREF_NET_SPEED_UNIT = 'netSpeedUnit';
 /** Resource-monitor disk I/O unit: 'bytes' (B/s, default) or 'bps' (bits). */
 export const PREF_DISK_SPEED_UNIT = 'diskSpeedUnit';
 
+/** ID of the workspace that was active on last shutdown — restored on launch. */
+export const PREF_ACTIVE_WORKSPACE = 'activeWorkspace';
+
 let cache: Record<string, unknown> = {};
 const listeners = new Set<() => void>();
 

@@ -666,21 +666,21 @@ func (a *App) ListWorkspaces() []workspace.Workspace {
 	return a.workspaces.List()
 }
 
-// SaveWorkspace upserts a workspace by name. The frontend supplies the
+// SaveWorkspace upserts a workspace by ID. The frontend supplies the
 // current tab layout in the wire format.
 func (a *App) SaveWorkspace(w workspace.Workspace) error {
 	return a.workspaces.Save(w)
 }
 
-// DeleteWorkspace removes a workspace by name.
-func (a *App) DeleteWorkspace(name string) error {
-	return a.workspaces.Delete(name)
+// DeleteWorkspace removes a workspace by ID.
+func (a *App) DeleteWorkspace(id string) error {
+	return a.workspaces.Delete(id)
 }
 
-// GetWorkspace returns one workspace by name. Used by the frontend when
-// loading — the snapshot drives tab re-creation.
-func (a *App) GetWorkspace(name string) (workspace.Workspace, error) {
-	return a.workspaces.Get(name)
+// GetWorkspace returns one workspace by ID. Used by the frontend when
+// switching — the snapshot drives tab re-creation.
+func (a *App) GetWorkspace(id string) (workspace.Workspace, error) {
+	return a.workspaces.Get(id)
 }
 
 // ---- Macros ----------------------------------------------------------------

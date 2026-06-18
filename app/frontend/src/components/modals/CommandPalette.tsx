@@ -83,8 +83,8 @@ export function CommandPalette({ sessions, groups, workspaces, recents, onClose,
   const actionItems: Item[] = useMemo(
     () => [
       { id: 'action:new-session', title: 'New Session…', subtitle: 'ACTION', action: { kind: 'new-session' } },
-      { id: 'action:save-workspace', title: 'Save Current Workspace…', subtitle: 'ACTION', action: { kind: 'save-workspace' } },
-      { id: 'action:manage-workspaces', title: 'Manage Workspaces…', subtitle: 'ACTION', action: { kind: 'manage-workspaces' } },
+      { id: 'action:save-workspace', title: 'New Workspace', subtitle: 'ACTION', action: { kind: 'save-workspace' } },
+      { id: 'action:manage-workspaces', title: 'Switch Workspace…', subtitle: 'ACTION', action: { kind: 'manage-workspaces' } },
     ],
     [],
   );

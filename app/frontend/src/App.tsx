@@ -34,6 +34,7 @@ import {
   SaveWorkspace,
   DeleteWorkspace,
   GetWorkspace,
+  GetUIPrefs,
   ListMacros,
   SaveMacro,
   DeleteMacro,
@@ -49,10 +50,13 @@ import {
 } from '../wailsjs/go/main/App';
 import { EventsOn, WindowFullscreen, WindowUnfullscreen } from '../wailsjs/runtime/runtime';
 import { isLinux, isMac } from './lib/platform';
-import { initUIPrefs } from './lib/uiprefs';
+import { initUIPrefs, getStringPref, setPref, PREF_ACTIVE_WORKSPACE } from './lib/uiprefs';
 import { AuroraFrame } from './components/aurora/AuroraFrame';
 import { TopChrome } from './components/aurora/TopChrome';
 import { Sidebar, type Group, type Session } from './components/aurora/Sidebar';
+import { WorkspaceSidebar, type SidebarMode } from './components/aurora/WorkspaceSidebar';
+import { SidebarRail } from './components/aurora/SidebarRail';
+import { WorkspaceGlyph, WORKSPACE_ICON_KEYS, HOME_WORKSPACE_ICON } from './components/aurora/WorkspaceGlyph';
 import { TabBar, type Tab, type PaneState } from './components/aurora/TabBar';
 import { StatusBar } from './components/aurora/StatusBar';
 import { TooltipHost } from './components/aurora/TooltipHost';
@@ -110,7 +114,7 @@ import {
 import { NewSessionModal, type NewSessionDraft } from './components/modals/NewSessionModal';
 import { parseQuickConnect, type QuickConnectDraft } from './lib/parseQuickConnect';
 import { CommandPalette, type PaletteAction } from './components/modals/CommandPalette';
-import { SaveWorkspaceModal } from './components/modals/WorkspaceModals';
+import { WorkspaceAppearanceModal, type WsMeta } from './components/modals/WorkspaceModals';
 import { WorkspacesPopover } from './components/modals/WorkspacesPopover';
 import { SettingsMenu } from './components/modals/SettingsMenu';
 import { ShortcutsModal } from './components/modals/ShortcutsModal';
@@ -124,8 +128,20 @@ import { ConfirmDialog, Modal, Field, TextInput, SecretInput, PrimaryButton, Gho
 import { ICON, FS, TOKENS, FOLDER_COLORS, isFileOnly } from './theme';
 import { RELAYOUT_EVENT } from './lib/relayout';
 
+// Reserved id of the permanent "home" workspace — always present and never
+// deletable; the fallback whenever no other workspace is active.
+const DEFAULT_WORKSPACE_ID = 'default';
+
 type WorkspaceTab = { label: string; layout: WsNode | LegacyColumn[] };
-type WorkspaceSnapshot = { name: string; tabs: WorkspaceTab[]; updatedAt: number };
+type WorkspaceSnapshot = {
+  id: string;
+  name: string;
+  tabs: WorkspaceTab[];
+  updatedAt: number;
+  icon?: string;
+  color?: string;
+  description?: string;
+};
 
 // Ordered MRU of opened targets, surfaced by the "+" tab menu. Persisted
 // by the Go backend (recents.json under the config dir) so it survives
@@ -216,6 +232,23 @@ function App() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [activePaneByTab, setActivePaneByTab] = useState<Record<string, string>>({});
+  // Workspaces own their tab bars. All instantiated workspaces' tabs live in
+  // the single `tabs` array (tagged by workspaceId) and stay mounted/connected;
+  // only the active workspace's tabs are shown. `activeWorkspaceId` is the
+  // current one; `instantiatedRef` tracks which have been materialized into
+  // live tabs this session (so switching doesn't re-load from disk); each
+  // workspace remembers its last active tab in `activeTabByWsRef`.
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>('');
+  const activeWorkspaceIdRef = useRef<string>('');
+  useEffect(() => {
+    activeWorkspaceIdRef.current = activeWorkspaceId;
+  }, [activeWorkspaceId]);
+  const instantiatedRef = useRef<Set<string>>(new Set());
+  const activeTabByWsRef = useRef<Record<string, string | null>>({});
+  // Remember the active tab per workspace so switching back restores it.
+  useEffect(() => {
+    if (activeWorkspaceId) activeTabByWsRef.current[activeWorkspaceId] = activeTabId;
+  }, [activeTabId, activeWorkspaceId]);
   const [paneStates, setPaneStates] = useState<PaneStates>({});
   const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
 
@@ -225,6 +258,12 @@ function App() {
   // active pane (see toggleActivePanePanel).
   const [sidebarWidth, setSidebarWidth] = useState<number>(TOKENS.sidebarWidth);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  // Which sidebar view is shown — sessions tree or saved-workspaces rail.
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>('sessions');
+  // Open editor for an existing workspace's icon/color/notes (no layout change).
+  const [appearanceEdit, setAppearanceEdit] = useState<{ id: string; name: string; initial: WsMeta } | null>(
+    null,
+  );
 
   // Persisted UI preferences (backend prefs.json) — load once into the
   // synchronous cache that SettingsMenu and the terminal key handler read.
@@ -306,7 +345,6 @@ function App() {
     oldFingerprint: string;
     newFingerprint: string;
   } | null>(null);
-  const [saveWorkspaceOpen, setSaveWorkspaceOpen] = useState(false);
   const [manageWorkspacesOpen, setManageWorkspacesOpen] = useState(false);
   const workspacesBtnRef = useRef<HTMLButtonElement | null>(null);
   // "+" creates an empty tab; the empty tab's body shows the recents list.
@@ -357,6 +395,9 @@ function App() {
 
   // Workspaces
   const [workspaces, setWorkspaces] = useState<WorkspaceSnapshot[]>([]);
+  // Note: the initial load + active-workspace restore happens in the launch
+  // effect near the workspace logic; this callback is for later refreshes
+  // (e.g. after a config import replaces the on-disk records).
   const refreshWorkspaces = useCallback(async () => {
     try {
       const list = (await ListWorkspaces()) as unknown as WorkspaceSnapshot[];
@@ -365,9 +406,6 @@ function App() {
       setErr(String(e));
     }
   }, []);
-  useEffect(() => {
-    void refreshWorkspaces();
-  }, [refreshWorkspaces]);
 
   // Macros
   const [macros, setMacros] = useState<Macro[]>([]);
@@ -689,6 +727,7 @@ function App() {
     const paneId = newId('pane');
     const tab: Tab = {
       id: newId('tab'),
+      workspaceId: activeWorkspaceId,
       sessionId: s.id,
       type: s.type,
       label: s.label || s.host || 'session',
@@ -762,6 +801,7 @@ function App() {
     const paneId = newId('pane');
     const tab: Tab = {
       id: newId('tab'),
+      workspaceId: activeWorkspaceId,
       sessionId,
       type: d.type,
       label: d.label,
@@ -929,6 +969,7 @@ function App() {
     const firstCell = paneLeaves(newLayout)[0] ?? null;
     const newTab: Tab = {
       id: newTabId,
+      workspaceId: src.workspaceId,
       sessionId: firstCell?.sessionId ?? src.sessionId,
       type: src.type,
       label: `${src.label} (copy)`,
@@ -1224,6 +1265,7 @@ function App() {
     const s = sessionById(leaf.sessionId);
     const newTab: Tab = {
       id: newId('tab'),
+      workspaceId: source.workspaceId,
       sessionId: leaf.sessionId,
       type: s?.type || 'shell',
       label: s?.label || s?.host || 'session',
@@ -1260,7 +1302,11 @@ function App() {
       setTabs((cur) => {
         const next = cur.filter((t) => t.id !== tabId);
         if (tabId === activeTabId) {
-          setActiveTabId(next.length > 0 ? next[next.length - 1].id : null);
+          // Pick the next active tab from the SAME workspace (the closed tab's
+          // workspace), so closing never jumps the user to another workspace's
+          // tabs. Empty workspace → null (shows the empty state).
+          const sameWs = next.filter((t) => t.workspaceId === tab.workspaceId);
+          setActiveTabId(sameWs.length > 0 ? sameWs[sameWs.length - 1].id : null);
         }
         return next;
       });
@@ -1296,12 +1342,15 @@ function App() {
     await reallyClose();
   };
 
-  // Close every tab at once. Unlike looping closeTab (which would race
-  // multiple confirm dialogs through the single `confirm` slot), this
-  // tears all panes down behind one confirmation.
+  // Close every tab in the ACTIVE workspace at once (other workspaces' tabs
+  // stay live). Unlike looping closeTab (which would race multiple confirm
+  // dialogs through the single `confirm` slot), this tears them all down
+  // behind one confirmation.
   const closeAllTabs = async () => {
+    const wsId = activeWorkspaceId;
+    const wsTabs = tabs.filter((t) => t.workspaceId === wsId);
     const allPaneIds: string[] = [];
-    for (const t of tabs) for (const leaf of paneLeaves(t.layout)) allPaneIds.push(leaf.id);
+    for (const t of wsTabs) for (const leaf of paneLeaves(t.layout)) allPaneIds.push(leaf.id);
     const reallyCloseAll = async () => {
       for (const pid of allPaneIds) {
         try {
@@ -1310,18 +1359,28 @@ function App() {
           /* idempotent — ignore */
         }
       }
-      setTabs([]);
+      const closedIds = new Set(wsTabs.map((t) => t.id));
+      setTabs((cur) => cur.filter((t) => !closedIds.has(t.id)));
       setActiveTabId(null);
-      setActivePaneByTab({});
-      setSyncInputTabs(new Set());
+      setActivePaneByTab((cur) => {
+        const out = { ...cur };
+        closedIds.forEach((id) => delete out[id]);
+        return out;
+      });
+      setSyncInputTabs((cur) => {
+        if (![...closedIds].some((id) => cur.has(id))) return cur;
+        const out = new Set(cur);
+        closedIds.forEach((id) => out.delete(id));
+        return out;
+      });
     };
-    if (tabs.length > 1 || allPaneIds.length > 1) {
+    if (wsTabs.length > 1 || allPaneIds.length > 1) {
       setConfirm({
         title: 'Close all tabs?',
         body: (
           <>
-            This will close <b>{tabs.length}</b> tab{tabs.length === 1 ? '' : 's'} and tear down
-            all open connections.
+            This will close <b>{wsTabs.length}</b> tab{wsTabs.length === 1 ? '' : 's'} in this
+            workspace and tear down their connections.
           </>
         ),
         danger: true,
@@ -1339,6 +1398,7 @@ function App() {
   const newEmptyTab = () => {
     const tab: Tab = {
       id: newId('tab'),
+      workspaceId: activeWorkspaceId,
       sessionId: '',
       type: 'shell',
       label: 'new tab',
@@ -1361,11 +1421,18 @@ function App() {
   };
 
   const reorderTab = (fromIdx: number, toIdx: number) => {
+    // Indices are positions within the visible (active-workspace) tab bar.
+    // Reorder among that workspace's tabs, then refill their slots in the
+    // global array so other workspaces' tabs keep their positions.
     setTabs((cur) => {
-      const next = cur.slice();
-      const [moved] = next.splice(fromIdx, 1);
-      next.splice(toIdx, 0, moved);
-      return next;
+      const wsId = activeWorkspaceIdRef.current;
+      const wsTabs = cur.filter((t) => t.workspaceId === wsId);
+      if (fromIdx < 0 || fromIdx >= wsTabs.length) return cur;
+      const reordered = wsTabs.slice();
+      const [moved] = reordered.splice(fromIdx, 1);
+      reordered.splice(Math.max(0, Math.min(toIdx, reordered.length)), 0, moved);
+      let i = 0;
+      return cur.map((t) => (t.workspaceId === wsId ? reordered[i++] : t));
     });
   };
 
@@ -1389,44 +1456,18 @@ function App() {
     const s = snap.sessions.find((x) => x.id === sessionId);
     return !!s && !isFileOnly(s.type);
   };
-  // Tabs eligible to save: those with at least one shell pane (file-only
-  // panes are dropped from the snapshot). Drives the per-tab picker in the
-  // Save Workspace modal.
-  const savableTabs = tabs
-    .map((t) => ({
-      id: t.id,
-      label: t.label,
-      paneCount: paneLeaves(t.layout).filter((c) => isShellSession(c.sessionId)).length,
-    }))
-    .filter((t) => t.paneCount > 0);
-
-  // cwds maps a backend pane id → the shell's current working directory
-  // (OSC 7-tracked), so a restored workspace cd's each pane back. Panes
-  // that never emitted OSC 7 are simply absent (left cwd-less on restore).
-  const serializeWorkspace = (
-    name: string,
-    tabsToSave: typeof tabs,
-    cwds?: Map<string, string>,
-  ): WorkspaceSnapshot => {
-    const cwdFor = cwds ? (id: string) => cwds.get(id) : undefined;
-    const outTabs: WorkspaceTab[] = [];
-    for (const t of tabsToSave) {
-      // Drop non-shell (SFTP/FTP/S3) leaves, then strip backend pane ids.
-      const shellLayout = filterLeaves(t.layout, (leaf) => isShellSession(leaf.sessionId));
-      if (shellLayout) outTabs.push({ label: t.label, layout: toWsNode(shellLayout, cwdFor) });
-    }
-    return { name, tabs: outTabs, updatedAt: Date.now() };
-  };
-
-  const onSaveWorkspace = async (name: string, tabIds: string[]) => {
-    const wanted = new Set(tabIds);
-    const tabsToSave = tabs.filter((t) => wanted.has(t.id));
-    // Snapshot each shell pane's live cwd before serializing. GetPaneCwd
-    // returns "" (or errors) when the shell hasn't emitted OSC 7; those
-    // panes are skipped so restore just opens them in their default dir.
+  // Build a fresh snapshot of one workspace from its current live tabs.
+  // Excludes transient (quick-connect) and file-only panes — workspaces only
+  // persist real shell sessions. Captures each shell pane's OSC 7 cwd so a
+  // later instantiation cd's the pane back; panes that never reported a cwd
+  // are simply absent. Returns null for an unknown workspace id.
+  const snapshotWorkspace = async (wsId: string): Promise<WorkspaceSnapshot | null> => {
+    const meta = workspaces.find((w) => w.id === wsId);
+    if (!meta) return null;
+    const wsTabs = tabs.filter((t) => t.workspaceId === wsId && !tempTabIds.has(t.id));
     const cwds = new Map<string, string>();
     await Promise.all(
-      tabsToSave.flatMap((t) =>
+      wsTabs.flatMap((t) =>
         paneLeaves(t.layout)
           .filter((l) => isShellSession(l.sessionId))
           .map(async (l) => {
@@ -1434,102 +1475,324 @@ function App() {
               const c = await GetPaneCwd(l.id);
               if (c) cwds.set(l.id, c);
             } catch {
-              /* pane closed or never reported a cwd — skip */
+              /* pane closed or no cwd yet — skip */
             }
           }),
       ),
     );
-    const snapshot = serializeWorkspace(name, tabsToSave, cwds);
-    if (snapshot.tabs.length === 0) {
-      setErr('Nothing to save — workspaces only store shell sessions (SFTP/FTP/S3 panes are excluded).');
-      return;
+    const outTabs: WorkspaceTab[] = [];
+    for (const t of wsTabs) {
+      const shellLayout = filterLeaves(t.layout, (leaf) => isShellSession(leaf.sessionId));
+      if (shellLayout) outTabs.push({ label: t.label, layout: toWsNode(shellLayout, (id) => cwds.get(id)) });
     }
-    setSaveWorkspaceOpen(false);
+    return {
+      id: meta.id,
+      name: meta.name,
+      tabs: outTabs,
+      updatedAt: Date.now(),
+      icon: meta.icon,
+      color: meta.color,
+      description: meta.description,
+    };
+  };
+
+  // Persist the active workspace (driven by the debounced effect below).
+  // Skips until the workspace is fully instantiated, so the switch race
+  // (activeWorkspaceId set before its tabs exist) can't clobber disk with an
+  // empty layout.
+  const autosaveActiveWorkspace = async () => {
+    const wsId = activeWorkspaceIdRef.current;
+    if (!wsId || !instantiatedRef.current.has(wsId)) return;
+    const snapshot = await snapshotWorkspace(wsId);
+    if (!snapshot) return;
     try {
       await SaveWorkspace(snapshot as any);
-      await refreshWorkspaces();
+      // Keep the in-memory list's tabs/updatedAt fresh (rail tab counts).
+      setWorkspaces((cur) =>
+        cur.map((w) => (w.id === wsId ? { ...w, tabs: snapshot.tabs, updatedAt: snapshot.updatedAt } : w)),
+      );
     } catch (e) {
       setErr(String(e));
     }
   };
 
-  const onLoadWorkspace = async (name: string) => {
+  // Materialize a workspace's saved snapshot into live tabs (tagged with its
+  // id) and open/connect each pane. Marks it instantiated. Returns the new
+  // tabs so the caller can pick an active tab synchronously.
+  const instantiateWorkspace = async (wsId: string): Promise<Tab[]> => {
+    instantiatedRef.current.add(wsId); // mark up-front so autosave won't reload-race
+    let ws: WorkspaceSnapshot | null = null;
+    try {
+      ws = (await GetWorkspace(wsId)) as unknown as WorkspaceSnapshot;
+    } catch (e) {
+      setErr(String(e));
+    }
+    if (!ws || !ws.tabs || ws.tabs.length === 0) return [];
+    const newTabs: Tab[] = [];
+    const newActiveByTab: Record<string, string> = {};
+    // Restore-cwd per fresh pane id (ids are globally unique), consumed by the
+    // OpenPaneInDir loop below.
+    const restoreCwd = new Map<string, string>();
+    for (const wt of ws.tabs) {
+      // Accepts the new tree shape or the legacy column array; both yield a
+      // live layout with fresh pane ids. onLeaf collects any saved cwd.
+      const layout = loadWsLayout(wt.layout, () => newId('pane'), (id, cwd) => restoreCwd.set(id, cwd));
+      if (!layout) continue;
+      const firstCell = paneLeaves(layout)[0] ?? null;
+      const sourceSession = firstCell ? snap.sessions.find((s) => s.id === firstCell.sessionId) : null;
+      const tabId = newId('tab');
+      newTabs.push({
+        id: tabId,
+        workspaceId: wsId,
+        sessionId: firstCell?.sessionId ?? '',
+        type: sourceSession?.type ?? 'ssh',
+        label: wt.label || ws.name,
+        state: 'Connecting',
+        layout,
+      });
+      if (firstCell) newActiveByTab[tabId] = firstCell.id;
+    }
+    setTabs((cur) => [...cur, ...newTabs]);
+    setActivePaneByTab((cur) => ({ ...cur, ...newActiveByTab }));
+    for (const tab of newTabs) {
+      for (const leaf of paneLeaves(tab.layout)) {
+        // Reopen in the saved cwd when we have one; OpenPaneInDir with an
+        // empty dir is identical to OpenPane.
+        OpenPaneInDir(leaf.id, leaf.sessionId, restoreCwd.get(leaf.id) ?? '').catch((e) =>
+          setErr(`OpenPane ${leaf.sessionId}: ${String(e)}`),
+        );
+      }
+    }
+    return newTabs;
+  };
+
+  // Switch the active workspace, revealing its tab bar. Instantiates it on the
+  // first switch; afterwards its tabs are already live (just hidden), so the
+  // switch is instant and connections stay up.
+  const switchWorkspace = async (wsId: string) => {
+    if (!wsId || wsId === activeWorkspaceIdRef.current) return;
     setManageWorkspacesOpen(false);
     setPaletteOpen(false);
+    let wsTabIds: string[];
+    if (!instantiatedRef.current.has(wsId)) {
+      const created = await instantiateWorkspace(wsId);
+      wsTabIds = created.map((t) => t.id);
+    } else {
+      wsTabIds = tabs.filter((t) => t.workspaceId === wsId).map((t) => t.id);
+    }
+    activeWorkspaceIdRef.current = wsId;
+    setActiveWorkspaceId(wsId);
+    const remembered = activeTabByWsRef.current[wsId];
+    setActiveTabId(remembered && wsTabIds.includes(remembered) ? remembered : wsTabIds[0] ?? null);
+    setPref(PREF_ACTIVE_WORKSPACE, wsId);
+    const name = workspaces.find((w) => w.id === wsId)?.name;
+    if (name) pushRecent({ kind: 'workspace', name });
+  };
+
+  // Resolve a workspace name to its id (first match) and switch. Used by the
+  // command palette / recents / empty-state, which reference workspaces by name.
+  const switchWorkspaceByName = (name: string) => {
+    const ws = workspaces.find((w) => w.name === name);
+    if (ws) void switchWorkspace(ws.id);
+  };
+
+  // Create a new, empty workspace and switch to it (lands on an empty bar).
+  // The icon/color are randomized (the user picks no appearance up front) so
+  // workspaces are visually distinct at a glance; both are editable later.
+  const newWorkspace = async () => {
+    const id = newId('ws');
+    const taken = new Set(workspaces.map((w) => w.name));
+    let n = workspaces.length + 1;
+    let name = `Workspace ${n}`;
+    while (taken.has(name)) name = `Workspace ${++n}`;
+    const snapshot: WorkspaceSnapshot = {
+      id,
+      name,
+      tabs: [],
+      updatedAt: Date.now(),
+      icon: WORKSPACE_ICON_KEYS[Math.floor(Math.random() * WORKSPACE_ICON_KEYS.length)],
+      color: FOLDER_COLORS[Math.floor(Math.random() * FOLDER_COLORS.length)],
+    };
     try {
-      const ws = (await GetWorkspace(name)) as unknown as WorkspaceSnapshot;
-      if (!ws || !ws.tabs) return;
-      pushRecent({ kind: 'workspace', name });
-      const newTabs: Tab[] = [];
-      const newActiveByTab: Record<string, string> = {};
-      // Restore-cwd per fresh pane id, accumulated across all tabs (pane
-      // ids are globally unique), consumed by the OpenPaneInDir loop below.
-      const restoreCwd = new Map<string, string>();
-      for (let i = 0; i < ws.tabs.length; i++) {
-        const wt = ws.tabs[i];
-        const tabId = newId('tab');
-        // Accepts the new tree shape or the legacy column array; both yield a
-        // live layout with fresh pane ids. onLeaf collects any saved cwd.
-        const layout = loadWsLayout(wt.layout, () => newId('pane'), (id, cwd) => restoreCwd.set(id, cwd));
-        if (!layout) continue;
-        const firstCell = paneLeaves(layout)[0] ?? null;
-        const sourceSession = firstCell ? snap.sessions.find((s) => s.id === firstCell.sessionId) : null;
-        // Tab labels mirror the workspace name. When the workspace
-        // has multiple tabs, append a 1-based index so they remain
-        // distinguishable in the tab bar.
-        const label = ws.tabs.length > 1 ? `${ws.name} ${i + 1}` : ws.name;
-        newTabs.push({
-          id: tabId,
-          sessionId: firstCell?.sessionId ?? '',
-          type: sourceSession?.type ?? 'ssh',
-          label,
-          state: 'Connecting',
-          layout,
-        });
-        if (firstCell) newActiveByTab[tabId] = firstCell.id;
-      }
-      setTabs((cur) => [...cur, ...newTabs]);
-      setActivePaneByTab((cur) => ({ ...cur, ...newActiveByTab }));
-      if (newTabs[0]) setActiveTabId(newTabs[0].id);
-      for (const tab of newTabs) {
-        for (const leaf of paneLeaves(tab.layout)) {
-          // Reopen in the saved cwd when we have one; OpenPaneInDir with an
-          // empty dir is identical to OpenPane.
-          OpenPaneInDir(leaf.id, leaf.sessionId, restoreCwd.get(leaf.id) ?? '').catch((e) =>
-            setErr(`OpenPane ${leaf.sessionId}: ${String(e)}`),
-          );
+      await SaveWorkspace(snapshot as any);
+    } catch (e) {
+      setErr(String(e));
+      return;
+    }
+    setWorkspaces((cur) => [...cur, snapshot]);
+    instantiatedRef.current.add(id);
+    activeWorkspaceIdRef.current = id;
+    setActiveWorkspaceId(id);
+    setActiveTabId(null);
+    setPref(PREF_ACTIVE_WORKSPACE, id);
+    setSidebarMode('workspaces');
+  };
+
+  // Open the appearance/rename editor for a workspace (by id), prefilled from
+  // the in-memory list.
+  const onEditWorkspaceAppearance = (wsId: string) => {
+    const ws = workspaces.find((w) => w.id === wsId);
+    if (!ws) return;
+    setAppearanceEdit({
+      id: ws.id,
+      name: ws.name,
+      initial: { name: ws.name, icon: ws.icon, color: ws.color, description: ws.description },
+    });
+  };
+
+  // Persist edited name/appearance (layout untouched): merge into the live
+  // snapshot and upsert by id.
+  const saveWorkspaceAppearance = async (wsId: string, meta: WsMeta) => {
+    setAppearanceEdit(null);
+    const ws = workspaces.find((w) => w.id === wsId);
+    if (!ws) return;
+    const name = (meta.name ?? ws.name).trim() || ws.name;
+    const updated: WorkspaceSnapshot = {
+      ...ws,
+      name,
+      icon: meta.icon,
+      color: meta.color,
+      description: meta.description,
+      updatedAt: Date.now(),
+    };
+    try {
+      await SaveWorkspace(updated as any);
+      setWorkspaces((cur) => cur.map((w) => (w.id === wsId ? updated : w)));
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  // Delete a workspace: tear down its live panes, drop its tabs, remove it
+  // from the store, and fall back to the default workspace if it was active.
+  const performDeleteWorkspace = async (wsId: string) => {
+    if (wsId === DEFAULT_WORKSPACE_ID) return; // the home workspace is permanent
+    for (const t of tabs.filter((t) => t.workspaceId === wsId)) {
+      for (const leaf of paneLeaves(t.layout)) {
+        try {
+          await ClosePane(leaf.id);
+        } catch {
+          /* idempotent */
         }
       }
-    } catch (e) {
-      setErr(String(e));
     }
-  };
-
-  const performDeleteWorkspace = async (name: string) => {
+    setTabs((cur) => cur.filter((t) => t.workspaceId !== wsId));
+    instantiatedRef.current.delete(wsId);
+    delete activeTabByWsRef.current[wsId];
     try {
-      await DeleteWorkspace(name);
-      await refreshWorkspaces();
+      await DeleteWorkspace(wsId);
     } catch (e) {
       setErr(String(e));
     }
+    const nextList = workspaces.filter((w) => w.id !== wsId);
+    setWorkspaces(nextList);
+    if (activeWorkspaceIdRef.current === wsId) {
+      // Fall back to the permanent default (always present, never the deleted
+      // one — so switchWorkspace's same-id guard won't short-circuit).
+      void switchWorkspace(DEFAULT_WORKSPACE_ID);
+    }
   };
 
-  const onDeleteWorkspace = (name: string) => {
+  const onDeleteWorkspace = (wsId: string) => {
+    if (wsId === DEFAULT_WORKSPACE_ID) return; // permanent — no delete dialog
+    const ws = workspaces.find((w) => w.id === wsId);
+    const paneN = tabs
+      .filter((t) => t.workspaceId === wsId)
+      .reduce((n, t) => n + paneCount(t.layout), 0);
     setConfirm({
       title: 'Delete workspace',
       body: (
         <>
-          Delete workspace <b>{name}</b>? This cannot be undone.
+          Delete workspace <b>{ws?.name ?? 'this workspace'}</b>?
+          {paneN > 0 && (
+            <>
+              {' '}
+              This tears down <b>{paneN}</b> open pane{paneN === 1 ? '' : 's'}.
+            </>
+          )}{' '}
+          This cannot be undone.
         </>
       ),
       danger: true,
       confirmLabel: 'Delete workspace',
       onConfirm: async () => {
         setConfirm(null);
-        await performDeleteWorkspace(name);
+        await performDeleteWorkspace(wsId);
       },
     });
   };
+
+  // Debounced auto-save of the active workspace whenever its tabs/layout change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!activeWorkspaceId || !instantiatedRef.current.has(activeWorkspaceId)) return;
+    const h = setTimeout(() => void autosaveActiveWorkspace(), 600);
+    return () => clearTimeout(h);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs, activeWorkspaceId]);
+
+  // Launch: restore the last-active workspace (or first, or create a default)
+  // and instantiate it — reconnecting its tabs. Runs once on mount.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let list: WorkspaceSnapshot[] = [];
+      try {
+        list = ((await ListWorkspaces()) as unknown as WorkspaceSnapshot[]) || [];
+      } catch (e) {
+        setErr(String(e));
+      }
+      if (cancelled) return;
+      // Ensure the permanent default ("home") workspace exists. It can't be
+      // deleted and is the fallback whenever nothing else is active.
+      const existingDefault = list.find((w) => w.id === DEFAULT_WORKSPACE_ID);
+      if (!existingDefault) {
+        const def: WorkspaceSnapshot = {
+          id: DEFAULT_WORKSPACE_ID,
+          name: 'Default',
+          tabs: [],
+          updatedAt: Date.now(),
+          icon: HOME_WORKSPACE_ICON,
+          color: FOLDER_COLORS[0],
+        };
+        try {
+          await SaveWorkspace(def as any);
+        } catch (e) {
+          setErr(String(e));
+        }
+        if (cancelled) return;
+        list = [def, ...list];
+      } else if (!existingDefault.icon || existingDefault.icon === 'bookmark') {
+        // Upgrade a pre-home default to the reserved house glyph. 'bookmark'
+        // was the old hardcoded default icon and was never user-selectable for
+        // the default, so replacing it can't clobber a deliberate choice.
+        const upgraded: WorkspaceSnapshot = { ...existingDefault, icon: HOME_WORKSPACE_ICON };
+        try {
+          await SaveWorkspace(upgraded as any);
+        } catch (e) {
+          setErr(String(e));
+        }
+        if (cancelled) return;
+        list = list.map((w) => (w.id === DEFAULT_WORKSPACE_ID ? upgraded : w));
+      }
+      setWorkspaces(list);
+      let savedActive = '';
+      try {
+        const p = (await GetUIPrefs()) as Record<string, unknown> | null;
+        if (p && typeof p[PREF_ACTIVE_WORKSPACE] === 'string') savedActive = p[PREF_ACTIVE_WORKSPACE] as string;
+      } catch {
+        /* prefs unavailable — fall through to the default */
+      }
+      if (cancelled) return;
+      const targetId =
+        savedActive && list.some((w) => w.id === savedActive) ? savedActive : DEFAULT_WORKSPACE_ID;
+      void switchWorkspace(targetId);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ─── Palette dispatch ────────────────────────────────────────────────
   const onPaletteAction = (action: PaletteAction) => {
@@ -1542,13 +1805,13 @@ function App() {
         void openTransientSession(action.draft);
         break;
       case 'load-workspace':
-        void onLoadWorkspace(action.name);
+        switchWorkspaceByName(action.name);
         break;
       case 'new-session':
         setNewSessionModal({ groupId: '' });
         break;
       case 'save-workspace':
-        setSaveWorkspaceOpen(true);
+        void newWorkspace();
         break;
       case 'manage-workspaces':
         setManageWorkspacesOpen(true);
@@ -1568,6 +1831,10 @@ function App() {
   const splitPaneRef = useRef(splitPane);
   const closePaneRef = useRef(closePane);
   const toggleFullscreenRef = useRef(toggleFullscreen);
+  // For the Del shortcut: which sidebar view is active and how to delete a
+  // workspace (latest instances, called from the once-registered listener).
+  const sidebarModeRef = useRef(sidebarMode);
+  const onDeleteWorkspaceRef = useRef<(id: string) => void>(() => {});
   useEffect(() => {
     tabsRef.current = tabs;
     activeTabIdRef.current = activeTabId;
@@ -1577,7 +1844,9 @@ function App() {
     splitPaneRef.current = splitPane;
     closePaneRef.current = closePane;
     toggleFullscreenRef.current = toggleFullscreen;
-  }, [tabs, activeTabId, activePaneByTab, selectedSessionId, deleteSessionConfirm, splitPane, closePane, toggleFullscreen]);
+    sidebarModeRef.current = sidebarMode;
+    onDeleteWorkspaceRef.current = onDeleteWorkspace;
+  }, [tabs, activeTabId, activePaneByTab, selectedSessionId, deleteSessionConfirm, splitPane, closePane, toggleFullscreen, sidebarMode, onDeleteWorkspace]);
 
   // Broadcast a relayout signal whenever pane/panel GEOMETRY changes (close,
   // split, resize, panel add/remove/move) so every mounted terminal re-fits to
@@ -1675,7 +1944,7 @@ function App() {
         // idiom — shells never claim it).
         e.preventDefault();
         e.stopPropagation();
-        const list = tabsRef.current;
+        const list = tabsRef.current.filter((t) => t.workspaceId === activeWorkspaceIdRef.current);
         if (list.length < 2) return;
         const idx = list.findIndex((t) => t.id === activeTabIdRef.current);
         const dir = e.shiftKey ? -1 : 1;
@@ -1693,7 +1962,7 @@ function App() {
         // Cmd+1..9 too (the browser/iTerm tab-jump convention there).
         e.preventDefault();
         e.stopPropagation();
-        const list = tabsRef.current;
+        const list = tabsRef.current.filter((t) => t.workspaceId === activeWorkspaceIdRef.current);
         const n = parseInt(e.key, 10);
         const target = n === 9 ? list[list.length - 1] : list[n - 1];
         if (!target) return;
@@ -1748,10 +2017,10 @@ function App() {
         !e.altKey &&
         !e.metaKey
       ) {
-        // Delete a selected session from the sidebar. On mac the big delete
-        // key sends Backspace (forward-Delete needs Fn), so accept it there.
-        // Skip if focus is in a text field / terminal so the key keeps
-        // working inside inputs, modal forms, and the xterm hidden textarea.
+        // Delete the selected sidebar item. On mac the big delete key sends
+        // Backspace (forward-Delete needs Fn), so accept it there. Skip if
+        // focus is in a text field / terminal so the key keeps working inside
+        // inputs, modal forms, and the xterm hidden textarea.
         const ae = document.activeElement as HTMLElement | null;
         const inField =
           !!ae &&
@@ -1760,6 +2029,16 @@ function App() {
             ae.tagName === 'SELECT' ||
             ae.isContentEditable);
         if (inField) return;
+        // In the Workspaces view, Del removes the active workspace (the
+        // permanent default is guarded inside onDeleteWorkspace).
+        if (sidebarModeRef.current === 'workspaces') {
+          const wsId = activeWorkspaceIdRef.current;
+          if (!wsId) return;
+          e.preventDefault();
+          e.stopPropagation();
+          onDeleteWorkspaceRef.current(wsId);
+          return;
+        }
         const sid = selectedSessionIdRef.current;
         if (!sid) return;
         e.preventDefault();
@@ -1877,11 +2156,20 @@ function App() {
 
   const workspaceEntries = useMemo(
     () =>
-      workspaces.map((w) => ({
-        name: w.name,
-        tabCount: w.tabs?.length ?? 0,
-        updatedAt: w.updatedAt,
-      })),
+      workspaces
+        .map((w) => ({
+          id: w.id,
+          name: w.name,
+          tabCount: w.tabs?.length ?? 0,
+          updatedAt: w.updatedAt,
+          icon: w.icon,
+          color: w.color,
+          description: w.description,
+        }))
+        // Pin the permanent default first; keep the rest in store (name) order.
+        .sort((a, b) =>
+          a.id === DEFAULT_WORKSPACE_ID ? -1 : b.id === DEFAULT_WORKSPACE_ID ? 1 : 0,
+        ),
     [workspaces],
   );
 
@@ -1940,7 +2228,7 @@ function App() {
       else setErr('Could not parse quick-connect command.');
     } else {
       const name = item.key.slice('workspace:'.length);
-      void onLoadWorkspace(name);
+      switchWorkspaceByName(name);
     }
   };
 
@@ -1990,6 +2278,10 @@ function App() {
   );
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || null;
+  // The tab bar shows only the active workspace's tabs (all workspaces' tabs
+  // stay mounted; visibility is gated below so connections stay live).
+  const activeWorkspaceTabs = tabs.filter((t) => t.workspaceId === activeWorkspaceId);
+  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) || null;
   const activePaneId = activeTab ? activePaneByTab[activeTab.id] || null : null;
   const activePaneSessionId =
     activeTab && activePaneId ? findLeaf(activeTab.layout, activePaneId)?.sessionId || null : null;
@@ -2177,11 +2469,6 @@ function App() {
         label: 'Duplicate tab',
         onClick: () => void duplicateTab(tabId),
       },
-      {
-        kind: 'item',
-        label: 'Save as workspace…',
-        onClick: () => setSaveWorkspaceOpen(true),
-      },
       { kind: 'separator' },
       {
         kind: 'item',
@@ -2192,10 +2479,12 @@ function App() {
       {
         kind: 'item',
         label: 'Close other tabs',
-        disabled: tabs.length <= 1,
+        disabled: tabs.filter((t) => t.workspaceId === activeWorkspaceId).length <= 1,
         onClick: () => {
+          // Only other tabs in the SAME workspace (the clicked tab's).
+          const wsId = tabs.find((t) => t.id === tabId)?.workspaceId;
           for (const other of tabs) {
-            if (other.id !== tabId) void closeTab(other.id);
+            if (other.id !== tabId && other.workspaceId === wsId) void closeTab(other.id);
           }
         },
       },
@@ -2247,92 +2536,69 @@ function App() {
             height. The tab row, body, and status bar all live inside
             the right column, starting at the sidebar's right edge. */}
         <div style={{ flex: '1 1 auto', display: 'flex', minHeight: 0 }}>
-          {/* Sidebar — collapsible. Renders a slim 28px rail with an
-              expand chevron when collapsed; full panel otherwise. Hidden
-              entirely in full-screen mode (tabs + panes only). */}
-          {fullscreen ? null : sidebarCollapsed ? (
-            <div
-              style={{
-                width: 28,
-                flex: '0 0 28px',
-                minHeight: 0,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                padding: '10px 0',
-                background: 'rgba(255,255,255,0.015)',
-              }}
-            >
-              <button
-                data-tip="Expand sidebar"
-                onClick={() => setSidebarCollapsed(false)}
-                style={{
-                  appearance: 'none',
-                  border: 0,
-                  cursor: 'pointer',
-                  background: 'transparent',
-                  color: TOKENS.fgDim,
-                  padding: 4,
-                  borderRadius: 6,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
-                  e.currentTarget.style.color = TOKENS.fg;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'transparent';
-                  e.currentTarget.style.color = TOKENS.fgDim;
-                }}
-              >
-                <svg width={ICON.sm} height={ICON.sm} viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M3 4 L7 8 L3 12 M7 4 L11 8 L7 12"
-                    stroke="currentColor"
-                    strokeWidth="1.4"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </button>
-            </div>
-          ) : (
+          {/* Sidebar — the activity-bar rail is always shown (when not in
+              full-screen); the content PANEL is what collapses/expands. A rail
+              icon switches view and, when clicked on the already-active view,
+              toggles the panel (VS Code idiom). */}
+          {fullscreen ? null : (
             <>
-              <div
-                ref={sidebarRef}
-                style={{
-                  width: sidebarWidth,
-                  flex: `0 0 ${sidebarWidth}px`,
-                  minHeight: 0,
-                }}
-              >
-                <Sidebar
-                  groups={snap.groups}
-                  sessions={snap.sessions}
-                  selectedSessionId={selectedSessionId}
-                  onSelectSession={(s) => setSelectedSessionId(s?.id ?? null)}
-                  onOpenSession={openSession}
-                  onOpenInCurrentTab={openInCurrentTab}
-                  onDuplicateSession={duplicateSession}
-                  onAddGroup={addGroup}
-                  onAddSession={addSession}
-                  onRenameGroup={renameGroup}
-                  onDeleteGroup={deleteGroupConfirm}
-                  onChangeGroupColor={changeGroupColor}
-                  onRenameSession={renameSession}
-                  renameTick={sidebarRenameTick}
-                  onEditSession={editSession}
-                  onDeleteSession={deleteSessionConfirm}
-                  onMoveSession={moveSessionAct}
-                  onReorderGroup={reorderGroupAct}
-                  onCollapse={() => setSidebarCollapsed(true)}
-                  onRefresh={() => void refresh()}
-                  onNotice={showToast}
-                />
-              </div>
-              <Resizer onMouseDown={startSidebarDrag} />
+              <SidebarRail
+                mode={sidebarMode}
+                onModeChange={setSidebarMode}
+                collapsed={sidebarCollapsed}
+                onExpand={() => setSidebarCollapsed(false)}
+                onCollapse={() => setSidebarCollapsed(true)}
+              />
+              {!sidebarCollapsed && (
+                <>
+                  <div
+                    ref={sidebarRef}
+                    style={{
+                      width: sidebarWidth,
+                      flex: `0 0 ${sidebarWidth}px`,
+                      minHeight: 0,
+                    }}
+                  >
+                    {sidebarMode === 'workspaces' ? (
+                      <WorkspaceSidebar
+                        workspaces={workspaceEntries}
+                        activeId={activeWorkspaceId}
+                        defaultId={DEFAULT_WORKSPACE_ID}
+                        onSwitch={(id) => void switchWorkspace(id)}
+                        onDelete={onDeleteWorkspace}
+                        onEditAppearance={onEditWorkspaceAppearance}
+                        onNewWorkspace={() => void newWorkspace()}
+                        onCollapse={() => setSidebarCollapsed(true)}
+                      />
+                    ) : (
+                      <Sidebar
+                        groups={snap.groups}
+                        sessions={snap.sessions}
+                        selectedSessionId={selectedSessionId}
+                        onSelectSession={(s) => setSelectedSessionId(s?.id ?? null)}
+                        onOpenSession={openSession}
+                        onOpenInCurrentTab={openInCurrentTab}
+                        onDuplicateSession={duplicateSession}
+                        onAddGroup={addGroup}
+                        onAddSession={addSession}
+                        onRenameGroup={renameGroup}
+                        onDeleteGroup={deleteGroupConfirm}
+                        onChangeGroupColor={changeGroupColor}
+                        onRenameSession={renameSession}
+                        renameTick={sidebarRenameTick}
+                        onEditSession={editSession}
+                        onDeleteSession={deleteSessionConfirm}
+                        onMoveSession={moveSessionAct}
+                        onReorderGroup={reorderGroupAct}
+                        onCollapse={() => setSidebarCollapsed(true)}
+                        onRefresh={() => void refresh()}
+                        onNotice={showToast}
+                      />
+                    )}
+                  </div>
+                  <Resizer onMouseDown={startSidebarDrag} />
+                </>
+              )}
             </>
           )}
 
@@ -2361,8 +2627,35 @@ function App() {
                 flex: '0 0 auto',
               }}
             >
+              {/* Active-workspace indicator + switcher — shows which workspace
+                  you're in (tooltip = its name) and opens the workspace
+                  switcher on click. Built on ToolBtn (same trigger mechanism
+                  the popover has always used). Works in full-screen, where the
+                  rail is hidden. */}
+              {activeWorkspace && (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    flex: '0 0 auto',
+                    marginRight: 6,
+                    paddingRight: 6,
+                    borderRight: `1px solid ${TOKENS.border}`,
+                    alignSelf: 'stretch',
+                  }}
+                >
+                  <ToolBtn
+                    ref={workspacesBtnRef}
+                    title={`Workspace: ${activeWorkspace.name}`}
+                    active={manageWorkspacesOpen}
+                    onClick={() => setManageWorkspacesOpen((v) => !v)}
+                  >
+                    <WorkspaceGlyph icon={activeWorkspace.icon} color={activeWorkspace.color} size={ICON.lg} />
+                  </ToolBtn>
+                </div>
+              )}
               <TabBar
-                tabs={tabs}
+                tabs={activeWorkspaceTabs}
                 activeId={activeTabId}
                 onSelect={setActiveTabId}
                 onClose={closeTab}
@@ -2386,21 +2679,6 @@ function App() {
               >
                 <svg width={ICON.xl} height={ICON.xl} viewBox="0 0 14 14" fill="none">
                   <path d="M2 4 H12 M2 7 H8 M2 10 H10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                </svg>
-              </ToolBtn>
-              <ToolBtn
-                ref={workspacesBtnRef}
-                title="Saved workspaces"
-                active={manageWorkspacesOpen}
-                onClick={() => setManageWorkspacesOpen((v) => !v)}
-              >
-                <svg width={ICON.xl} height={ICON.xl} viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M4.5 3.5 A1.5 1.5 0 0 1 6 2 H10 A1.5 1.5 0 0 1 11.5 3.5 V14 L8 11.3 L4.5 14 Z"
-                    stroke="currentColor"
-                    strokeWidth="1.3"
-                    strokeLinejoin="round"
-                  />
                 </svg>
               </ToolBtn>
               <ToolBtn
@@ -2500,10 +2778,15 @@ function App() {
             {/* Body row: panes | right panel */}
             <div style={{ flex: '1 1 auto', display: 'flex', minHeight: 0 }}>
               <div style={{ flex: '1 1 auto', minWidth: 0, minHeight: 0, padding: 0, display: 'flex', position: 'relative' }}>
-                {tabs.length === 0 ? (
-                  <EmptyState items={recentTabItems} onPick={onPickRecent} />
-                ) : (
-                  tabs.map((t) => (
+                {/* Render EVERY workspace's tabs (kept mounted so connections
+                    stay live); show only the active workspace's active tab.
+                    EmptyState overlays when the active workspace has no tabs. */}
+                {tabs.map((t) => {
+                  // Shown only when it's the active tab of the active workspace;
+                  // every other tab stays mounted but hidden (keeps connections
+                  // live across tab/workspace switches).
+                  const shown = t.workspaceId === activeWorkspaceId && t.id === activeTabId;
+                  return (
                     <div
                       key={t.id}
                       style={{
@@ -2516,8 +2799,8 @@ function App() {
                         right: 4,
                         bottom: 4,
                         left: 4,
-                        visibility: t.id === activeTabId ? 'visible' : 'hidden',
-                        pointerEvents: t.id === activeTabId ? 'auto' : 'none',
+                        visibility: shown ? 'visible' : 'hidden',
+                        pointerEvents: shown ? 'auto' : 'none',
                         display: 'flex',
                         flexDirection: 'column',
                         minHeight: 0,
@@ -2541,7 +2824,7 @@ function App() {
                               else setErr('Could not parse quick-connect command.');
                             } else {
                               const name = item.key.slice('workspace:'.length);
-                              void onLoadWorkspace(name);
+                              switchWorkspaceByName(name);
                             }
                           }}
                           onDropSession={(sid) => splitIntoTabBySession(t.id, sid)}
@@ -2644,7 +2927,12 @@ function App() {
                         />
                       )}
                     </div>
-                  ))
+                  );
+                })}
+                {activeWorkspaceTabs.length === 0 && (
+                  <div style={{ position: 'absolute', inset: 0 }}>
+                    <EmptyState items={recentTabItems} onPick={onPickRecent} />
+                  </div>
                 )}
               </div>
 
@@ -2943,12 +3231,12 @@ function App() {
           </div>
         </Modal>
       )}
-      {saveWorkspaceOpen && (
-        <SaveWorkspaceModal
-          existingNames={workspaces.map((w) => w.name)}
-          tabs={savableTabs}
-          onCancel={() => setSaveWorkspaceOpen(false)}
-          onSubmit={onSaveWorkspace}
+      {appearanceEdit && (
+        <WorkspaceAppearanceModal
+          name={appearanceEdit.name}
+          initial={appearanceEdit.initial}
+          onCancel={() => setAppearanceEdit(null)}
+          onSubmit={(meta) => void saveWorkspaceAppearance(appearanceEdit.id, meta)}
         />
       )}
       {macrosMenuOpen && (
@@ -2975,16 +3263,17 @@ function App() {
         <WorkspacesPopover
           anchor={workspacesBtnRef.current}
           workspaces={workspaceEntries}
+          activeId={activeWorkspaceId}
+          defaultId={DEFAULT_WORKSPACE_ID}
           onClose={() => setManageWorkspacesOpen(false)}
-          onLoad={(name) => {
+          onSwitch={(id) => {
             setManageWorkspacesOpen(false);
-            onLoadWorkspace(name);
+            void switchWorkspace(id);
           }}
           onDelete={onDeleteWorkspace}
-          canSave={!activeIsFileOnly}
-          onSaveCurrent={() => {
+          onNewWorkspace={() => {
             setManageWorkspacesOpen(false);
-            setSaveWorkspaceOpen(true);
+            void newWorkspace();
           }}
         />
       )}

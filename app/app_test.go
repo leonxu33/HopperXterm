@@ -87,18 +87,18 @@ func TestProfileCRUD(t *testing.T) {
 
 func TestWorkspaceCRUD(t *testing.T) {
 	a := newTestApp(t)
-	ws := workspace.Workspace{Name: "W1", UpdatedAt: 1}
+	ws := workspace.Workspace{ID: "w1", Name: "W1", UpdatedAt: 1}
 	if err := a.SaveWorkspace(ws); err != nil {
 		t.Fatalf("SaveWorkspace: %v", err)
 	}
 	if len(a.ListWorkspaces()) != 1 {
 		t.Errorf("ListWorkspaces count != 1")
 	}
-	got, err := a.GetWorkspace("W1")
+	got, err := a.GetWorkspace("w1")
 	if err != nil || got.Name != "W1" {
 		t.Errorf("GetWorkspace: %+v %v", got, err)
 	}
-	if err := a.DeleteWorkspace("W1"); err != nil {
+	if err := a.DeleteWorkspace("w1"); err != nil {
 		t.Errorf("DeleteWorkspace: %v", err)
 	}
 	if len(a.ListWorkspaces()) != 0 {

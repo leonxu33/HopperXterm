@@ -2,6 +2,8 @@ package workspace
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -20,6 +22,7 @@ func makeWS(name string, sessionIDs ...string) Workspace {
 		layout = map[string]interface{}{"kind": "split", "dir": "row", "weight": 1.0, "children": children}
 	}
 	return Workspace{
+		ID:        name, // names are unique in these tests, so ID=name is a valid key
 		Name:      name,
 		Tabs:      []Tab{{Label: name + " tab", Layout: layout}},
 		UpdatedAt: 1700000000000,
@@ -74,15 +77,21 @@ func TestStore_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestSave_IDRequired(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	if err := s.Save(Workspace{Name: "noid"}); err == nil {
+		t.Error("expected error for empty id")
+	}
+}
+
 func TestSave_NameRequired(t *testing.T) {
 	s, _ := Open(t.TempDir())
-	err := s.Save(Workspace{Name: ""})
-	if err == nil {
+	if err := s.Save(Workspace{ID: "id1", Name: ""}); err == nil {
 		t.Error("expected error for empty name")
 	}
 }
 
-func TestSave_UpsertByName(t *testing.T) {
+func TestSave_UpsertByID(t *testing.T) {
 	s, _ := Open(t.TempDir())
 	_ = s.Save(makeWS("dev", "s1"))
 	_ = s.Save(makeWS("dev", "s2", "s3"))
@@ -92,6 +101,47 @@ func TestSave_UpsertByName(t *testing.T) {
 	}
 	if len(s.List()) != 1 {
 		t.Errorf("upsert created duplicate; list=%v", s.List())
+	}
+}
+
+// Renaming keeps the same ID, so a Save with an unchanged ID but new Name
+// updates in place rather than creating a duplicate.
+func TestSave_RenameKeepsIdentity(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	w := makeWS("orig", "s1")
+	_ = s.Save(w)
+	w.Name = "renamed"
+	_ = s.Save(w)
+	if len(s.List()) != 1 {
+		t.Fatalf("rename created duplicate; list=%v", s.List())
+	}
+	got, err := s.Get("orig") // ID is still "orig"
+	if err != nil {
+		t.Fatalf("Get by id after rename: %v", err)
+	}
+	if got.Name != "renamed" {
+		t.Errorf("name got %q want %q", got.Name, "renamed")
+	}
+}
+
+// Legacy records written before IDs existed (no "id" field) get ID=Name
+// backfilled on load.
+func TestLoad_BackfillsLegacyID(t *testing.T) {
+	dir := t.TempDir()
+	legacy := `[{"name":"old","tabs":[],"updatedAt":1}]`
+	if err := os.WriteFile(filepath.Join(dir, workspacesFile), []byte(legacy), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	got, err := s.Get("old") // resolvable by the backfilled ID (=Name)
+	if err != nil {
+		t.Fatalf("Get backfilled id: %v", err)
+	}
+	if got.ID != "old" {
+		t.Errorf("backfilled ID got %q want %q", got.ID, "old")
 	}
 }
 

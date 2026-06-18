@@ -12,6 +12,9 @@ export type PaneState = 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected';
 
 export type Tab = {
   id: string;
+  /** Which workspace this tab belongs to. The tab bar shows only the active
+   *  workspace's tabs; all workspaces' tabs stay mounted (connections live). */
+  workspaceId: string;
   sessionId: string;
   type: string;
   label: string;
