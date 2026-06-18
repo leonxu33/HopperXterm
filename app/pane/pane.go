@@ -40,8 +40,33 @@ type Pane struct {
 	ctx    context.Context // pane lifetime
 	cancel context.CancelFunc
 
-	pty transport.PtyChannel // I/O for all transports
-	ssh *transport.Shell     // non-nil iff this pane is an SSH session
+	// sess is the session this pane was opened against, kept so the
+	// reconnect supervisor can re-dial it in place. durable gates
+	// auto-reconnect (SSH/EC2 only) — see the reconnect machinery below.
+	sess    profile.Session
+	durable bool
+
+	// connMu guards the ssh/pty pointers because the reconnect
+	// supervisor swaps them on a live pane while keepalive, the
+	// resource/process pollers, SFTP, and input handlers read them from
+	// other goroutines. Read via currentSSH/currentPTY, write via setConn.
+	connMu sync.RWMutex
+	pty    transport.PtyChannel // I/O for all transports
+	ssh    *transport.Shell     // non-nil iff this pane is an SSH session
+
+	// Reconnect supervision (durable sessions, Phase A). On an
+	// unexpected drop a durable pane auto-reconnects with backoff
+	// instead of parking at "Press r"; a clean remote exit or a
+	// user-initiated close does not. reconnMu guards all three fields.
+	// closing marks a user teardown so a drop is never mistaken for one;
+	// handling dedups the two drop notifiers (keepalive failure vs
+	// readLoop EOF) so only the first starts the reconnect loop; gen is
+	// the connection generation — incremented on every (re)connect so a
+	// stale goroutine from a superseded connection can detect it's old.
+	reconnMu sync.Mutex
+	closing  bool
+	handling bool
+	gen      int
 
 	mu    sync.RWMutex
 	state State
@@ -78,6 +103,9 @@ type Pane struct {
 	resCancel context.CancelFunc
 	resOn     bool
 	resRefs   int
+	// resGen tags each poller launch so a superseded poller's deferred
+	// cleanup (after a reconnect re-arm) can't clobber the new one's state.
+	resGen int
 
 	// Per-process monitors, keyed by spec ("pid:<n>" | "cmd:<name>"). Each
 	// entry owns one SSH exec channel streaming that target's CPU/memory at
@@ -162,6 +190,8 @@ func newPane(appCtx context.Context, paneID string, sess profile.Session) *Pane 
 	p := &Pane{
 		ID:        paneID,
 		SessionID: sess.ID,
+		sess:      sess,
+		durable:   sess.Type == profile.SessionSSH || sess.Type == profile.SessionAWSEC2,
 		appCtx:    appCtx,
 		ctx:       paneCtx,
 		cancel:    cancel,
@@ -207,35 +237,7 @@ func (p *Pane) connectSSHLike(sess profile.Session) error {
 	p.startConnectAnimation(sess.User + "@" + sess.Host)
 	defer p.stopConnectAnimation()
 
-	// Look up a saved password for this session — passed silently into
-	// the dial so the user isn't prompted when one's on file.
-	savedPwd, _ := credentials.GetPassword(sess.ID)
-
-	var client *ssh.Client
-	var err error
-	if sess.Type == profile.SessionAWSEC2 {
-		client, err = transport.DialEC2(transport.EC2DialConfig{
-			InstanceID:     sess.InstanceID,
-			Region:         sess.Region,
-			User:           sess.User,
-			PemFile:        sess.PemFile,
-			Port:           sess.Port,
-			Prompter:       p.prompt,
-			Profile:        sess.Profile,
-			SavedPassword:  savedPwd,
-			HostKeyChanged: p.promptHostKeyChange,
-		})
-	} else {
-		client, err = transport.DialSSH(transport.SSHDialConfig{
-			Host:           sess.Host,
-			User:           sess.User,
-			Port:           sess.Port,
-			Prompter:       p.prompt,
-			SavedPassword:  savedPwd,
-			PemFile:        sess.PemFile,
-			HostKeyChanged: p.promptHostKeyChange,
-		})
-	}
+	client, err := p.dialSSH(sess, true)
 	if err != nil {
 		events.EmitConnectionLog(p.appCtx, p.ID, events.LogErr, nowMillis(), "Dial failed: "+err.Error())
 		p.emitTerminalError("Dial failed: " + err.Error())
@@ -255,20 +257,55 @@ func (p *Pane) connectSSHLike(sess profile.Session) error {
 		return err
 	}
 
-	p.ssh = shell
-	p.pty = shell
+	p.setConn(shell, shell)
 	// Emit a clear BEFORE the readLoop starts forwarding PTY output, so
 	// any "Password:" / "Permission denied" lines from the auth phase
 	// are wiped before the remote shell's MOTD/prompt appears.
 	p.clearTerminalIfAuthed()
 	p.transition(StateConnected, "")
 
-	go p.readLoop()
-	go p.keepaliveLoop()
+	gen := p.nextGen()
+	go p.readLoop(gen)
+	go p.keepaliveLoop(gen)
 	go p.probeHostInfo(client)
 	p.maybeAskSavePassword(sess)
 	p.runConnectInit(sess)
 	return nil
+}
+
+// dialSSH performs the transport dial for an SSH / EC2 session. When
+// interactive is true the pane's terminal-driven prompter is wired in
+// (the normal first connect); when false — the auto-reconnect path —
+// the prompter is omitted so the dial uses keys + the saved password
+// only and never blocks waiting for input that can't be typed.
+func (p *Pane) dialSSH(sess profile.Session, interactive bool) (*ssh.Client, error) {
+	savedPwd, _ := credentials.GetPassword(sess.ID)
+	prompter := p.prompt
+	if !interactive {
+		prompter = nil
+	}
+	if sess.Type == profile.SessionAWSEC2 {
+		return transport.DialEC2(transport.EC2DialConfig{
+			InstanceID:     sess.InstanceID,
+			Region:         sess.Region,
+			User:           sess.User,
+			PemFile:        sess.PemFile,
+			Port:           sess.Port,
+			Prompter:       prompter,
+			Profile:        sess.Profile,
+			SavedPassword:  savedPwd,
+			HostKeyChanged: p.promptHostKeyChange,
+		})
+	}
+	return transport.DialSSH(transport.SSHDialConfig{
+		Host:           sess.Host,
+		User:           sess.User,
+		Port:           sess.Port,
+		Prompter:       prompter,
+		SavedPassword:  savedPwd,
+		PemFile:        sess.PemFile,
+		HostKeyChanged: p.promptHostKeyChange,
+	})
 }
 
 // probeHostInfo runs a one-shot probe over the SSH client to report
@@ -307,9 +344,9 @@ func (p *Pane) connectLocalShell(sess profile.Session) error {
 		return err
 	}
 	events.EmitConnectionLog(p.appCtx, p.ID, events.LogOK, nowMillis(), "Local shell: "+local.Name())
-	p.pty = local
+	p.setConn(nil, local)
 	p.transition(StateConnected, "")
-	go p.readLoop()
+	go p.readLoop(p.nextGen())
 	p.runConnectInit(sess)
 	return nil
 }
@@ -427,9 +464,9 @@ func (p *Pane) connectWSL(sess profile.Session) error {
 		return err
 	}
 	events.EmitConnectionLog(p.appCtx, p.ID, events.LogOK, nowMillis(), "WSL started: "+local.Name())
-	p.pty = local
+	p.setConn(nil, local)
 	p.transition(StateConnected, "")
-	go p.readLoop()
+	go p.readLoop(p.nextGen())
 	p.runConnectInit(sess)
 	return nil
 }
@@ -696,7 +733,7 @@ func (p *Pane) runConnectInit(sess profile.Session) {
 		case <-p.ctx.Done():
 			return
 		}
-		if p.pty == nil || p.pty.Stdin() == nil {
+		if pty := p.currentPTY(); pty == nil || pty.Stdin() == nil {
 			return
 		}
 		if p.cwdHookApplies(sess) {
@@ -757,7 +794,8 @@ func (p *Pane) writeStartupCmds(cmds string) {
 	if cmds == "" {
 		return
 	}
-	if p.pty == nil || p.pty.Stdin() == nil {
+	pty := p.currentPTY()
+	if pty == nil || pty.Stdin() == nil {
 		return
 	}
 	// Terminate every line with a carriage return (\r) — that's the byte a
@@ -771,7 +809,7 @@ func (p *Pane) writeStartupCmds(cmds string) {
 	if !strings.HasSuffix(payload, "\r") {
 		payload += "\r"
 	}
-	_, _ = p.pty.Stdin().Write([]byte(payload))
+	_, _ = pty.Stdin().Write([]byte(payload))
 }
 
 // maybeAskSavePassword emits pane:asksavepassword if the user typed a
@@ -910,10 +948,11 @@ func (p *Pane) SendInput(data []byte) error {
 
 	if !p.authActive {
 		p.authMu.Unlock()
-		if p.pty == nil || p.pty.Stdin() == nil {
+		pty := p.currentPTY()
+		if pty == nil || pty.Stdin() == nil {
 			return errors.New("pane: not connected")
 		}
-		_, err := p.pty.Stdin().Write(data)
+		_, err := pty.Stdin().Write(data)
 		return err
 	}
 
@@ -1017,7 +1056,8 @@ func (p *Pane) InstallOsc7Hook() error {
 // connection-log audit line so each caller's context is clear (the
 // "Follow terminal folder" toggle vs. automatic connect-time cwd tracking).
 func (p *Pane) installOsc7Hook(reason string) error {
-	if p.pty == nil || p.pty.Stdin() == nil {
+	pty := p.currentPTY()
+	if pty == nil || pty.Stdin() == nil {
 		return errors.New("pane: not connected")
 	}
 	// The hook is bash/zsh — never inject it into a Windows shell, where
@@ -1037,7 +1077,7 @@ func (p *Pane) installOsc7Hook(reason string) error {
 	p.swallowMarker = []byte(osc7EndMarker)
 	p.swallowDeadline = time.Now().Add(3 * time.Second)
 	p.swallowMu.Unlock()
-	_, err := p.pty.Stdin().Write([]byte(osc7Hook))
+	_, err := pty.Stdin().Write([]byte(osc7Hook))
 	if err == nil {
 		// Audit trail: the inject is silently filtered out of the
 		// user's terminal, so leave a one-line trace in the
@@ -1105,26 +1145,26 @@ func (p *Pane) applyOutputFilter(data []byte) []byte {
 
 // Resize forwards a PTY size change to the underlying transport.
 func (p *Pane) Resize(cols, rows int) error {
-	if p.pty == nil {
+	pty := p.currentPTY()
+	if pty == nil {
 		return errors.New("pane: not connected")
 	}
-	return p.pty.Resize(cols, rows)
+	return pty.Resize(cols, rows)
 }
 
 // Close terminates the connection and tears the goroutine tree down.
+// The closing flag is set first so any in-flight drop notifier (or the
+// reconnect loop) sees the teardown is user-initiated and stands down
+// instead of trying to auto-reconnect.
 func (p *Pane) Close() {
+	p.reconnMu.Lock()
+	p.closing = true
+	p.reconnMu.Unlock()
+
 	p.cancel()
 	p.stopResourceMonitor()
 	p.stopAllProcessMonitors()
-	p.fileMu.Lock()
-	if p.file != nil {
-		_ = p.file.Close()
-		p.file = nil
-	}
-	p.fileMu.Unlock()
-	if p.pty != nil {
-		_ = p.pty.Close()
-	}
+	p.teardownShell()
 	p.transition(StateDisconnected, "closed by user")
 }
 
@@ -1132,10 +1172,14 @@ func (p *Pane) Close() {
 // underlying stream closes or the pane context is cancelled. The same
 // stream is also scanned for OSC 7 cwd-change sequences so the SFTP
 // panel's "Follow terminal folder" toggle can track the shell's pwd.
-func (p *Pane) readLoop() {
+func (p *Pane) readLoop(gen int) {
 	defer logbook.Recover("pane.readLoop")
 	buf := make([]byte, 8192)
-	out := p.pty.Stdout()
+	pty := p.currentPTY()
+	if pty == nil {
+		return
+	}
+	out := pty.Stdout()
 	var osc osc7Scanner
 	emit := func(host, path string) {
 		p.cwdMu.Lock()
@@ -1155,13 +1199,20 @@ func (p *Pane) readLoop() {
 			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(p.ctx.Err(), context.Canceled) {
-				p.emitTerminalClosed()
-				p.transition(StateDisconnected, "")
-			} else {
-				p.emitTerminalError(err.Error())
-				p.transition(StateDisconnected, err.Error())
+			// User-initiated teardown (Close cancels the context, or a
+			// reconnect closed the old shell). Nothing to report.
+			if errors.Is(p.ctx.Err(), context.Canceled) {
+				return
 			}
+			// The shell stream ended. A bare io.EOF leaves reason empty so
+			// onConnectionEnded probes whether the SSH link is still alive
+			// (clean `exit`) or actually dropped; a transport error is a
+			// drop outright.
+			reason := ""
+			if !errors.Is(err, io.EOF) {
+				reason = err.Error()
+			}
+			p.onConnectionEnded(gen, reason)
 			return
 		}
 	}

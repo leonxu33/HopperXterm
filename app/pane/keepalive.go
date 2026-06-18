@@ -14,16 +14,18 @@ const (
 	missesUntilDisconnected = 2
 )
 
-// keepaliveLoop pings the remote every keepaliveInterval. Two consecutive
-// misses (~10 s) demote the pane to Disconnected and tear the shell down
-// so the read loop exits and the UI stops waiting on a dead socket. One
-// miss puts the pane in Suspect — the UI surfaces a warn indicator, and
-// the next successful ping recovers to Connected.
+// keepaliveLoop pings the remote every keepaliveInterval. One miss puts
+// the pane in Suspect — the UI surfaces a warn indicator, and the next
+// successful ping recovers to Connected. Two consecutive misses (~10 s)
+// hand off to the reconnect coordinator: a durable pane auto-reconnects,
+// any other falls to Disconnected. gen tags the connection this loop
+// belongs to so it stops cleanly once a reconnect supersedes it.
 //
-// Exits when the pane context is cancelled or after declaring
-// Disconnected; the read loop's own EOF handling covers the case where
-// the kernel-level TCP error fires before keepalive can.
-func (p *Pane) keepaliveLoop() {
+// Exits when the pane context is cancelled, when its generation is
+// superseded, or after declaring the connection ended; the read loop's
+// own EOF handling covers the case where the kernel-level TCP error
+// fires before keepalive can.
+func (p *Pane) keepaliveLoop(gen int) {
 	defer logbook.Recover("pane.keepaliveLoop")
 	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
@@ -36,10 +38,15 @@ func (p *Pane) keepaliveLoop() {
 		case <-ticker.C:
 		}
 
-		if p.ssh == nil {
+		// Stop once a reconnect has replaced this connection.
+		if !p.genCurrent(gen) {
 			return
 		}
-		ok := p.ssh.Ping(p.ctx, keepalivePingTimeout)
+		sh := p.currentSSH()
+		if sh == nil {
+			return
+		}
+		ok := sh.Ping(p.ctx, keepalivePingTimeout)
 
 		if ok {
 			if misses > 0 {
@@ -58,14 +65,11 @@ func (p *Pane) keepaliveLoop() {
 			p.transition(StateSuspect, "keepalive missed")
 			events.EmitConnectionLog(p.appCtx, p.ID, events.LogDim, nowMillis(), "Keepalive missed (suspect)")
 		case misses >= missesUntilDisconnected:
-			events.EmitConnectionLog(p.appCtx, p.ID, events.LogErr, nowMillis(), "Keepalive failed twice — disconnecting")
-			p.transition(StateDisconnected, "keepalive failures")
-			// Close the shell so the read loop sees EOF and exits.
-			// The Pane stays in Manager until the frontend asks to close
-			// it (responding to the pane:state:Disconnected event).
-			if p.ssh != nil {
-				_ = p.ssh.Close()
-			}
+			events.EmitConnectionLog(p.appCtx, p.ID, events.LogErr, nowMillis(), "Keepalive failed twice")
+			// Hand off to the coordinator: durable panes auto-reconnect,
+			// others go to Disconnected. It tears the dead shell down so
+			// the read loop sees EOF and exits.
+			p.onConnectionEnded(gen, "keepalive failures")
 			return
 		}
 	}

@@ -35,6 +35,22 @@ type paneSSHServer struct {
 	Port          int
 	ln            net.Listener
 	wg            sync.WaitGroup
+
+	connMu sync.Mutex
+	conns  []*ssh.ServerConn // live connections, for DropConnections
+}
+
+// DropConnections closes every live SSH connection while leaving the
+// listener up, simulating a network drop the client must auto-reconnect
+// from (a fresh dial reaches the same listener).
+func (s *paneSSHServer) DropConnections() {
+	s.connMu.Lock()
+	conns := s.conns
+	s.conns = nil
+	s.connMu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
 }
 
 func startPaneSSHServer(t *testing.T) *paneSSHServer {
@@ -86,7 +102,7 @@ func startPaneSSHServer(t *testing.T) *paneSSHServer {
 				return
 			}
 			s.wg.Add(1)
-			go func() { defer s.wg.Done(); paneHandleConn(conn, cfg) }()
+			go func() { defer s.wg.Done(); s.handleConn(conn, cfg) }()
 		}
 	}()
 	t.Cleanup(s.Close)
@@ -98,12 +114,15 @@ func (s *paneSSHServer) Close() {
 	s.wg.Wait()
 }
 
-func paneHandleConn(conn net.Conn, cfg *ssh.ServerConfig) {
+func (s *paneSSHServer) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 	sconn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
 		_ = conn.Close()
 		return
 	}
+	s.connMu.Lock()
+	s.conns = append(s.conns, sconn)
+	s.connMu.Unlock()
 	defer sconn.Close()
 	go func() {
 		for r := range reqs {
@@ -136,7 +155,7 @@ func paneHandleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			if req.WantReply {
 				_ = req.Reply(true, nil)
 			}
-			go func() { _, _ = io.Copy(ch, ch); _ = ch.Close() }()
+			go paneShellLoop(ch)
 		case "exec":
 			if req.WantReply {
 				_ = req.Reply(true, nil)
@@ -162,6 +181,32 @@ func paneHandleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			if req.WantReply {
 				_ = req.Reply(false, nil)
 			}
+		}
+	}
+}
+
+// paneShellLoop echoes shell input back like a real PTY. When it sees
+// "exit" it simulates the remote shell exiting cleanly — sends an
+// exit-status and closes the channel, but leaves the SSH connection up
+// (so a client keepalive ping still succeeds). This is the signal the
+// pane uses to distinguish a clean `exit` from a network drop.
+func paneShellLoop(ch ssh.Channel) {
+	defer ch.Close()
+	buf := make([]byte, 1024)
+	var line []byte
+	for {
+		n, err := ch.Read(buf)
+		if n > 0 {
+			_, _ = ch.Write(buf[:n]) // echo
+			line = append(line, buf[:n]...)
+			if bytes.Contains(line, []byte("exit")) {
+				var b [4]byte
+				_, _ = ch.SendRequest("exit-status", false, b[:])
+				return
+			}
+		}
+		if err != nil {
+			return
 		}
 	}
 }

@@ -430,14 +430,15 @@ type procMonitor struct {
 
 // ListProcesses runs the one-shot picker query and returns the parsed rows.
 func (p *Pane) ListProcesses() ([]events.ProcessInfo, error) {
-	if p.ssh == nil || p.ssh.Client == nil {
+	sh := p.currentSSH()
+	if sh == nil || sh.Client == nil {
 		return nil, errors.New("pane: process list requires an SSH-backed session")
 	}
 	osFamily := p.cachedOSFamily()
 	if osFamily == "" {
-		osFamily = transport.ClassifyRemoteOS(p.ssh.Client)
+		osFamily = transport.ClassifyRemoteOS(sh.Client)
 	}
-	sess, err := p.ssh.Client.NewSession()
+	sess, err := sh.Client.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("process: open session: %w", err)
 	}
@@ -468,8 +469,8 @@ func (p *Pane) ListProcesses() ([]events.ProcessInfo, error) {
 // machinery.
 func (p *Pane) StartProcessMonitor(pid int) error {
 	osFamily := p.cachedOSFamily()
-	if osFamily == "" && p.ssh != nil && p.ssh.Client != nil {
-		osFamily = transport.ClassifyRemoteOS(p.ssh.Client)
+	if sh := p.currentSSH(); osFamily == "" && sh != nil && sh.Client != nil {
+		osFamily = transport.ClassifyRemoteOS(sh.Client)
 	}
 	startCmd, stdinScript := processStreamCmd(osFamily, pid)
 	// terminal: a PID monitor ends on the exit tick.
@@ -481,8 +482,8 @@ func (p *Pane) StartProcessMonitor(pid int) error {
 // the process restarting under a new PID.
 func (p *Pane) StartProcessMonitorByCommand(command string) error {
 	osFamily := p.cachedOSFamily()
-	if osFamily == "" && p.ssh != nil && p.ssh.Client != nil {
-		osFamily = transport.ClassifyRemoteOS(p.ssh.Client)
+	if sh := p.currentSSH(); osFamily == "" && sh != nil && sh.Client != nil {
+		osFamily = transport.ClassifyRemoteOS(sh.Client)
 	}
 	startCmd, stdinScript := processCommandStreamCmd(osFamily, command)
 	// not terminal: keep polling across restarts (alive=false is just "down").
@@ -503,7 +504,8 @@ func cmdSpec(command string) string { return "cmd:" + command }
 // polling so a command monitor resumes after a restart. A repeat Start on a
 // live monitor just bumps the count.
 func (p *Pane) startProcessMonitor(spec string, terminal bool, startCmd, stdinScript string) error {
-	if p.ssh == nil || p.ssh.Client == nil {
+	sh := p.currentSSH()
+	if sh == nil || sh.Client == nil {
 		return errors.New("pane: process monitor requires an SSH-backed session")
 	}
 	p.procMu.Lock()
@@ -522,7 +524,7 @@ func (p *Pane) startProcessMonitor(spec string, terminal bool, startCmd, stdinSc
 		delete(p.procMon, spec)
 	}
 
-	sess, err := p.ssh.Client.NewSession()
+	sess, err := sh.Client.NewSession()
 	if err != nil {
 		return fmt.Errorf("process: open session: %w", err)
 	}
@@ -633,4 +635,68 @@ func (p *Pane) stopAllProcessMonitors() {
 		}
 		delete(p.procMon, spec)
 	}
+}
+
+// activeProcessSpecs snapshots the specs + refcounts of every tracked
+// process monitor, for re-arming after a reconnect. It deliberately
+// includes entries marked dead: a connection drop kills the monitor's
+// goroutine (setting dead) but leaves the entry in the map as the
+// still-wanted intent — those are exactly the ones to re-arm.
+func (p *Pane) activeProcessSpecs() map[string]int {
+	p.procMu.Lock()
+	defer p.procMu.Unlock()
+	if len(p.procMon) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(p.procMon))
+	for spec, m := range p.procMon {
+		out[spec] = m.refs
+	}
+	return out
+}
+
+// restartProcessMonitor relaunches a monitor against the new connection
+// after a reconnect, rebuilding its poller from the spec and restoring the
+// refcount that was live before the drop. Any stale entry for the spec is
+// dropped first so the launch isn't mistaken for a refcount bump on a dead
+// monitor.
+func (p *Pane) restartProcessMonitor(spec string, refs int) error {
+	osFamily := p.cachedOSFamily()
+	var startCmd, stdinScript string
+	var terminal bool
+	if rest, ok := strings.CutPrefix(spec, "pid:"); ok {
+		pid, err := strconv.Atoi(rest)
+		if err != nil {
+			return fmt.Errorf("process: bad pid spec %q", spec)
+		}
+		startCmd, stdinScript = processStreamCmd(osFamily, pid)
+		terminal = true
+	} else if rest, ok := strings.CutPrefix(spec, "cmd:"); ok {
+		startCmd, stdinScript = processCommandStreamCmd(osFamily, rest)
+		terminal = false
+	} else {
+		return fmt.Errorf("process: unrecognized spec %q", spec)
+	}
+
+	// Drop any stale entry so startProcessMonitor relaunches rather than
+	// bumping a dead monitor's refcount.
+	p.procMu.Lock()
+	if m, ok := p.procMon[spec]; ok {
+		if m.cancel != nil {
+			m.cancel()
+		}
+		delete(p.procMon, spec)
+	}
+	p.procMu.Unlock()
+
+	if err := p.startProcessMonitor(spec, terminal, startCmd, stdinScript); err != nil {
+		return err
+	}
+	// startProcessMonitor sets refs=1; restore the count from before the drop.
+	p.procMu.Lock()
+	if m, ok := p.procMon[spec]; ok {
+		m.refs = refs
+	}
+	p.procMu.Unlock()
+	return nil
 }

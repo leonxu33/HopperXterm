@@ -2318,6 +2318,7 @@ function App() {
         if (states.length === 0) return t;
         const worst: PaneState =
           states.find((s) => s === 'Disconnected') ??
+          states.find((s) => s === 'Reconnecting') ??
           states.find((s) => s === 'Suspect') ??
           states.find((s) => s === 'Connecting') ??
           'Connected';

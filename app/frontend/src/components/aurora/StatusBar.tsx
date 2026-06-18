@@ -69,7 +69,7 @@ type Session = {
 type Props = {
   paneId: string | null;
   session: Session | null;
-  state: 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected' | null;
+  state: 'Connecting' | 'Connected' | 'Suspect' | 'Reconnecting' | 'Disconnected' | null;
 };
 
 export function StatusBar({ paneId, session, state }: Props) {
@@ -219,9 +219,11 @@ export function StatusBar({ paneId, session, state }: Props) {
     ? '#ffd86e'
     : state === 'Suspect'
       ? '#ff9d6e'
-      : state === 'Disconnected'
-        ? '#ff9d9d'
-        : TOKENS.accent;
+      : state === 'Reconnecting'
+        ? '#ffb454'
+        : state === 'Disconnected'
+          ? '#ff9d9d'
+          : TOKENS.accent;
 
   // ── Right-click "Copy host info" ───────────────────────────────────
   // Bound to mousedown(button=2) + contextmenu both. WebView2 in Wails

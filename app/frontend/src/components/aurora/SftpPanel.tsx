@@ -84,7 +84,7 @@ type EditRow = {
 
 type Props = {
   paneId: string | null;
-  paneState: 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected' | null;
+  paneState: 'Connecting' | 'Connected' | 'Suspect' | 'Reconnecting' | 'Disconnected' | null;
   // Session this pane is bound to — used to reject cross-pane file drops
   // between two panes on the same session (same host: a no-op copy).
   sessionId: string | null;

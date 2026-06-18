@@ -8,7 +8,7 @@ import { ICON, FS, TOKENS } from '../../theme';
 import { ProtoIcon } from './ProtoIcon';
 import { paneCount, PANE_LIMIT, type PaneLayout } from './PaneGrid';
 
-export type PaneState = 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected';
+export type PaneState = 'Connecting' | 'Connected' | 'Suspect' | 'Reconnecting' | 'Disconnected';
 
 export type Tab = {
   id: string;
@@ -639,9 +639,11 @@ function stateDot(state: PaneState): CSSProperties {
       ? '#ffd86e'
       : state === 'Suspect'
         ? '#ff9d6e'
-        : state === 'Disconnected'
-          ? '#ff9d9d'
-          : TOKENS.fgMute;
+        : state === 'Reconnecting'
+          ? '#ffb454'
+          : state === 'Disconnected'
+            ? '#ff9d9d'
+            : TOKENS.fgMute;
   return {
     width: 5,
     height: 5,

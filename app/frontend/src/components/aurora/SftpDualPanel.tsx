@@ -82,7 +82,7 @@ type SessionShape = {
 
 type Props = {
   paneId: string | null;
-  paneState: 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected' | null;
+  paneState: 'Connecting' | 'Connected' | 'Suspect' | 'Reconnecting' | 'Disconnected' | null;
   session: SessionShape | null;
   logs?: LogEntry[];
   // True when this pane is the active pane of the active tab. The

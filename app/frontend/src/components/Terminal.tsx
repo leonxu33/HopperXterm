@@ -31,7 +31,7 @@ type Props = {
   /** Current pane state. When 'Disconnected', the terminal intercepts
    *  'r' / 'R' keypresses to trigger onReconnect instead of routing
    *  them to the (now-dead) backend SendInput. */
-  paneState?: 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected';
+  paneState?: 'Connecting' | 'Connected' | 'Suspect' | 'Reconnecting' | 'Disconnected';
   /** Called when the user presses 'r' in a Disconnected pane, or picks
    *  "Reload pane" from the context menu. Reconnects this pane. */
   onReconnect?: () => void;
@@ -158,10 +158,11 @@ export function Terminal({
 
   // Paste clipboard text into the pane. term.paste() routes through the
   // existing onData handler (so it broadcasts for sync-input and honors
-  // bracketed-paste); dropped while Disconnected since the PTY is gone.
+  // bracketed-paste); dropped while Disconnected or Reconnecting since the
+  // PTY is gone.
   const pasteClipboard = useCallback(() => {
     const term = termRef.current;
-    if (!term || stateRef.current === 'Disconnected') return;
+    if (!term || stateRef.current === 'Disconnected' || stateRef.current === 'Reconnecting') return;
     void ClipboardGetText()
       .then((text) => {
         if (text) term.paste(text);
@@ -344,8 +345,10 @@ export function Terminal({
       }
 
       // While Disconnected there's no PTY; let onData handle the 'r'
-      // reconnect chord and drop everything else.
-      if (stateRef.current === 'Disconnected') return true;
+      // reconnect chord and drop everything else. While Reconnecting the
+      // pane is auto-reconnecting — also no PTY, so drop shell-bound keys
+      // (copy/search/zoom above still work).
+      if (stateRef.current === 'Disconnected' || stateRef.current === 'Reconnecting') return true;
 
       // User-defined custom shortcuts (Settings → Custom shortcuts): send the
       // configured byte sequence instead of the key's default encoding. They
@@ -428,6 +431,10 @@ export function Terminal({
         }
         return;
       }
+      // Auto-reconnect in progress (durable session) — the PTY is gone
+      // and a reconnect is already underway, so drop input silently
+      // rather than treating 'r' as a manual reconnect.
+      if (stateRef.current === 'Reconnecting') return;
       broadcastRef.current?.(data);
       void SendInput(paneId, data);
     });
@@ -666,10 +673,10 @@ export function Terminal({
   }
 
   // "Run macro ▸" submenu — only when a replay target exists. Each entry
-  // bursts the recorded keystrokes into this pane. Disconnected panes have
-  // no PTY, so the whole submenu is disabled there.
+  // bursts the recorded keystrokes into this pane. Disconnected and
+  // Reconnecting panes have no PTY, so the whole submenu is disabled there.
   if (onRunMacro) {
-    const canRun = stateRef.current !== 'Disconnected';
+    const canRun = stateRef.current !== 'Disconnected' && stateRef.current !== 'Reconnecting';
     menuItems.push(
       { kind: 'separator' },
       {

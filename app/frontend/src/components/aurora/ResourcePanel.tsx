@@ -67,7 +67,7 @@ export type ResourceSample = {
 const MAX_BUFFER = 86400; // 24 h @ 1 Hz — retention depth for export.
 const MAX_HOSTS = 20; // LRU cap; idle hostKeys get evicted past this.
 
-type ResourceState = 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected';
+type ResourceState = 'Connecting' | 'Connected' | 'Suspect' | 'Reconnecting' | 'Disconnected';
 
 type BufferEntry = {
   samples: ResourceSample[];
@@ -433,7 +433,7 @@ function useProcessMonitor(paneId: string | null, target: ProcTarget | null) {
 
 type Props = {
   paneId: string | null;
-  paneState: 'Connecting' | 'Connected' | 'Suspect' | 'Disconnected' | null;
+  paneState: 'Connecting' | 'Connected' | 'Suspect' | 'Reconnecting' | 'Disconnected' | null;
   hostKey: string | null;
 };
 

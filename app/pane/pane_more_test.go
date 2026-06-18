@@ -19,7 +19,7 @@ func init() { keyring.MockInit() }
 func paneWithPTY(out string) (*Pane, *fakePTY) {
 	p := newPane(context.Background(), "p1", profile.Session{ID: "s1", Type: profile.SessionSSH})
 	f := &fakePTY{out: strings.NewReader(out)}
-	p.pty = f
+	p.setConn(nil, f)
 	return p, f
 }
 
@@ -28,7 +28,7 @@ func TestReadLoop_CapturesOsc7AndDisconnectsOnEOF(t *testing.T) {
 	out := "\x1b]7;file://host/var/www\x07welcome\n"
 	p, _ := paneWithPTY(out)
 	p.transition(StateConnected, "")
-	p.readLoop() // returns on EOF
+	p.readLoop(p.gen) // returns on EOF
 	if got := p.LastCwd(); got != "/var/www" {
 		t.Errorf("LastCwd = %q, want /var/www", got)
 	}

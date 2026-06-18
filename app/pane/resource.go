@@ -394,15 +394,33 @@ func resourceStreamCmd(osFamily string) (cmd, stdin string) {
 // shuts down only when the count hits zero. Two consumers (status bar
 // + resource panel) can independently subscribe/unsubscribe without
 // stomping on each other.
-func (p *Pane) StartResourceMonitor() error {
-	if p.ssh == nil || p.ssh.Client == nil {
+func (p *Pane) StartResourceMonitor() error { return p.adjustResourceMonitor(1) }
+
+// restartResourceMonitor relaunches the poller after a reconnect IF a
+// consumer still wants it. The consumer count (resRefs) survives the drop
+// — the dying poller's deferred cleanup clears only resOn, not resRefs —
+// so passing delta 0 relaunches with the pre-drop count intact, and is a
+// no-op when nobody was subscribed.
+func (p *Pane) restartResourceMonitor() error { return p.adjustResourceMonitor(0) }
+
+// adjustResourceMonitor adds delta to the consumer count and launches the
+// host poller when there's at least one consumer and it isn't already
+// running. resRefs is pure intent (frontend subscribers); it is decoupled
+// from poller liveness so a connection drop that kills the poller doesn't
+// erase the subscription — that's what lets a reconnect re-arm it.
+func (p *Pane) adjustResourceMonitor(delta int) error {
+	sh := p.currentSSH()
+	if sh == nil || sh.Client == nil {
 		return errors.New("pane: resource monitor requires an SSH-backed session")
 	}
 	p.resMu.Lock()
 	defer p.resMu.Unlock()
-	// Already running — just bump the refcount.
-	if p.resOn {
-		p.resRefs++
+	p.resRefs += delta
+	if p.resRefs < 0 {
+		p.resRefs = 0
+	}
+	// Already running, or nobody wants it — nothing to launch.
+	if p.resOn || p.resRefs == 0 {
 		return nil
 	}
 
@@ -413,11 +431,11 @@ func (p *Pane) StartResourceMonitor() error {
 	// inline if the poller somehow starts before the probe finished.
 	osFamily := p.cachedOSFamily()
 	if osFamily == "" {
-		osFamily = transport.ClassifyRemoteOS(p.ssh.Client)
+		osFamily = transport.ClassifyRemoteOS(sh.Client)
 	}
 	startCmd, stdinScript := resourceStreamCmd(osFamily)
 
-	sess, err := p.ssh.Client.NewSession()
+	sess, err := sh.Client.NewSession()
 	if err != nil {
 		return fmt.Errorf("resource: open session: %w", err)
 	}
@@ -465,17 +483,24 @@ func (p *Pane) StartResourceMonitor() error {
 	}()
 
 	ctx, cancel := context.WithCancel(p.ctx)
+	p.resGen++
+	gen := p.resGen
 	p.resCancel = cancel
 	p.resOn = true
-	p.resRefs = 1
 
 	go func() {
 		defer logbook.Recover("pane.resourceMonitor")
 		defer func() {
 			_ = sess.Close()
 			p.resMu.Lock()
-			p.resOn = false
-			p.resRefs = 0
+			// Mark the poller stopped, but DON'T touch resRefs — the
+			// consumers are still subscribed; a reconnect re-arms from that
+			// count. Guard on resGen so a superseded poller's exit (after a
+			// re-arm bumped the generation) can't clobber the new poller.
+			if p.resGen == gen {
+				p.resOn = false
+				p.resCancel = nil
+			}
 			p.resMu.Unlock()
 		}()
 		scanner := bufio.NewScanner(stdout)

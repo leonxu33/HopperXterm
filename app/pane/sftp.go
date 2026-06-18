@@ -32,8 +32,8 @@ func (p *Pane) fileClient() (transport.FileClient, error) {
 	if p.file != nil {
 		return p.file, nil
 	}
-	if p.ssh != nil && p.ssh.Client != nil {
-		s, err := transport.OpenSFTP(p.ssh.Client)
+	if sh := p.currentSSH(); sh != nil && sh.Client != nil {
+		s, err := transport.OpenSFTP(sh.Client)
 		if err != nil {
 			// Some hosts disable the SFTP subsystem but still support scp.
 			// Fall back to a shell+scp FileClient so the Remote Files panel
@@ -42,7 +42,7 @@ func (p *Pane) fileClient() (transport.FileClient, error) {
 			if p.cachedOSFamily() == "windows" {
 				return nil, err
 			}
-			scp, scpErr := transport.OpenSCP(p.ssh.Client)
+			scp, scpErr := transport.OpenSCP(sh.Client)
 			if scpErr != nil {
 				return nil, err // surface the original SFTP failure
 			}
