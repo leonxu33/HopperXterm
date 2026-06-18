@@ -36,7 +36,6 @@ import {
   SaveWorkspace,
   DeleteWorkspace,
   GetWorkspace,
-  GetUIPrefs,
   ListMacros,
   SaveMacro,
   DeleteMacro,
@@ -52,7 +51,7 @@ import {
 } from '../wailsjs/go/main/App';
 import { EventsOn, WindowFullscreen, WindowUnfullscreen } from '../wailsjs/runtime/runtime';
 import { isLinux, isMac } from './lib/platform';
-import { initUIPrefs, getStringPref, setPref, PREF_ACTIVE_WORKSPACE } from './lib/uiprefs';
+import { initUIPrefs, getStringPref } from './lib/uiprefs';
 import { AuroraFrame } from './components/aurora/AuroraFrame';
 import { TopChrome } from './components/aurora/TopChrome';
 import { Sidebar, type Group, type Session } from './components/aurora/Sidebar';
@@ -1641,7 +1640,6 @@ function App() {
     setActiveWorkspaceId(wsId);
     const remembered = activeTabByWsRef.current[wsId];
     setActiveTabId(remembered && wsTabIds.includes(remembered) ? remembered : wsTabIds[0] ?? null);
-    setPref(PREF_ACTIVE_WORKSPACE, wsId);
   };
 
   // Resolve a workspace name to its id (first match) and switch. Used by the
@@ -1679,7 +1677,6 @@ function App() {
     activeWorkspaceIdRef.current = id;
     setActiveWorkspaceId(id);
     setActiveTabId(null);
-    setPref(PREF_ACTIVE_WORKSPACE, id);
     setSidebarMode('workspaces');
   };
 
@@ -1897,19 +1894,10 @@ function App() {
         list = list.map((w) => (w.id === DEFAULT_WORKSPACE_ID ? restored : w));
       }
       setWorkspaces(list);
-      let savedActive = '';
-      try {
-        const p = (await GetUIPrefs()) as Record<string, unknown> | null;
-        if (p && typeof p[PREF_ACTIVE_WORKSPACE] === 'string') savedActive = p[PREF_ACTIVE_WORKSPACE] as string;
-      } catch {
-        /* prefs unavailable — fall through to the default */
-      }
       if (cancelled) return;
-      // Restore the saved-active workspace unless it's gone or now inactive
-      // (dormant workspaces aren't reopened on startup) — fall back to default.
-      const savedWs = savedActive ? list.find((w) => w.id === savedActive) : undefined;
-      const targetId = savedWs && !savedWs.inactive ? savedActive : DEFAULT_WORKSPACE_ID;
-      void switchWorkspace(targetId);
+      // Always land on the permanent Default workspace at startup, regardless of
+      // which workspace was active last session — startup is deterministic.
+      void switchWorkspace(DEFAULT_WORKSPACE_ID);
     })();
     return () => {
       cancelled = true;
