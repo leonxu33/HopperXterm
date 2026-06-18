@@ -94,7 +94,7 @@ Write-Output '----HOPPERPROBE-WINHOST----'
 Write-Output $env:COMPUTERNAME
 Write-Output '----HOPPERPROBE-END----'`
 
-// runWithTimeout opens a fresh session, runs cmd, and returns its
+// RunWithTimeout opens a fresh session, runs cmd, and returns its
 // combined (stdout+stderr) output. ok is false only when the session
 // can't be opened or the command doesn't finish within d — a nonzero
 // command exit is deliberately NOT a failure: callers parse best-effort
@@ -102,7 +102,7 @@ Write-Output '----HOPPERPROBE-END----'`
 // classifier relies on a Windows shell's "not recognized" stderr text. On
 // !ok the returned string is empty. The done channel is buffered so the
 // goroutine never leaks on timeout (sess.Close, deferred, unblocks it).
-func runWithTimeout(client *ssh.Client, cmd string, d time.Duration) (string, bool) {
+func RunWithTimeout(client *ssh.Client, cmd string, d time.Duration) (string, bool) {
 	sess, err := client.NewSession()
 	if err != nil {
 		return "", false
@@ -133,7 +133,7 @@ func ClassifyRemoteOS(client *ssh.Client) string {
 	if client == nil {
 		return ""
 	}
-	out, ok := runWithTimeout(client, "uname -s", 3*time.Second)
+	out, ok := RunWithTimeout(client, "uname -s", 3*time.Second)
 	if !ok {
 		return ""
 	}
@@ -170,7 +170,7 @@ func ProbeHostInfoSSH(client *ssh.Client) HostOSInfo {
 	var info HostOSInfo
 	if fam == "windows" {
 		info = probeWindowsHostInfo(client)
-	} else if out, ok := runWithTimeout(client, probeScript, 5*time.Second); ok {
+	} else if out, ok := RunWithTimeout(client, probeScript, 5*time.Second); ok {
 		info = ParseHostInfoOutput(out)
 	}
 	info.Family = fam
@@ -182,10 +182,10 @@ func ProbeHostInfoSSH(client *ssh.Client) HostOSInfo {
 // A nonzero PowerShell exit still gets parsed — partial output (e.g. the
 // hostname but not the CIM query) is better than nothing.
 func probeWindowsHostInfo(client *ssh.Client) HostOSInfo {
-	// runWithTimeout returns "" on timeout/failure, and parseWindowsHostInfo
+	// RunWithTimeout returns "" on timeout/failure, and parseWindowsHostInfo
 	// is safe on any input (yields the zero value), so the timeout/error
 	// cases collapse into the same parse call.
-	out, _ := runWithTimeout(client, PowerShellEncodedCmd(windowsProbeScript), 5*time.Second)
+	out, _ := RunWithTimeout(client, PowerShellEncodedCmd(windowsProbeScript), 5*time.Second)
 	return parseWindowsHostInfo(out)
 }
 

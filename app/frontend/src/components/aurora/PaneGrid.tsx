@@ -45,7 +45,7 @@ export type PaneNode = TreeNode<PanePayload>;
 /** A tab's layout: a single root node, or null for an empty tab. */
 export type PaneLayout = TreeLayout<PanePayload>;
 
-export type PaneInfo = { label: string; type: string };
+export type PaneInfo = { label: string; type: string; tmux?: boolean };
 
 export type { DropZone, EdgeZone } from '../../lib/splitTree';
 
@@ -318,6 +318,7 @@ function PaneCellView({ leaf, ctx }: { leaf: PaneLeaf; ctx: RenderCtx }) {
           paneId={leaf.id}
           label={info.label}
           type={info.type}
+          tmux={info.tmux}
           active={active}
           canSplit={!atMax && !ctx.locked}
           canDrag={ctx.multiPane}
@@ -462,6 +463,7 @@ function PaneHeader({
   paneId,
   label,
   type,
+  tmux,
   active,
   canSplit,
   canDrag,
@@ -478,6 +480,9 @@ function PaneHeader({
   paneId: string;
   label: string;
   type: string;
+  // True when the shell is running inside a durable tmux session (Phase B);
+  // surfaced as a small "tmux" badge next to the protocol badge.
+  tmux?: boolean;
   active: boolean;
   canSplit: boolean;
   // Pane-to-pane drag only makes sense with ≥2 panes; a lone pane has
@@ -582,6 +587,21 @@ function PaneHeader({
       >
         {label || '—'}
       </span>
+      {tmux && (
+        <span
+          title="Durable session — running inside tmux (survives drops & restarts)"
+          style={{
+            font: `540 ${FS.xs}px/1 ${TOKENS.mono}`,
+            padding: '2px 5px',
+            borderRadius: 4,
+            background: `color-mix(in oklch, ${TOKENS.accent}, transparent 86%)`,
+            color: TOKENS.accent,
+            letterSpacing: '.04em',
+          }}
+        >
+          tmux
+        </span>
+      )}
       <span
         style={{
           font: `540 ${FS.xs}px/1 ${TOKENS.mono}`,

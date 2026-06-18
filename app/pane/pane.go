@@ -68,6 +68,26 @@ type Pane struct {
 	handling bool
 	gen      int
 
+	// Durable-session multiplexer (Phase B). When the session opts into
+	// persistence (sess.Persist) and the remote has tmux, the shell runs
+	// inside a tmux session so processes/scrollback survive a drop and an app
+	// restart. tmuxID is the stable per-pane token the frontend persists in
+	// the workspace layout (minted at first connect if empty) — the tmux
+	// session name (tmuxName) is derived from it, so reopening a pane
+	// re-attaches its OWN session. tmuxLaunch is the attach-or-create exec
+	// command, replayed verbatim by the reconnect supervisor; empty means this
+	// pane is NOT tmux-backed (plain Phase-A auto-reconnect). appInstanceID
+	// namespaces this app instance's sessions (hopperxterm-<appInstanceID>-…;
+	// named to avoid confusion with sess.InstanceID, the EC2 instance) so the
+	// reaper never touches another instance's sessions. appInstanceID + tmuxID
+	// are set before connect (in Manager.OpenInDir); tmuxName/tmuxLaunch are set
+	// once during the first connect (before the read/keepalive goroutines start)
+	// and only read afterwards, so they need no extra lock.
+	appInstanceID string
+	tmuxID        string
+	tmuxName      string
+	tmuxLaunch    string
+
 	mu    sync.RWMutex
 	state State
 
@@ -247,7 +267,13 @@ func (p *Pane) connectSSHLike(sess profile.Session) error {
 	}
 	events.EmitConnectionLog(p.appCtx, p.ID, events.LogOK, nowMillis(), "SSH handshake complete")
 
-	shell, err := transport.StartShell(client)
+	// Durable sessions (Phase B): a persistent pane launches its shell inside
+	// tmux so it survives drops/restarts. launch == "" → plain login shell
+	// (non-persistent, or tmux unavailable → Phase-A fallback). runInit is
+	// false only when re-attaching an existing tmux session (already set up).
+	launch, runInit := p.setupPersistence(sess, client)
+
+	shell, err := transport.StartShellCmd(client, launch)
 	if err != nil {
 		client.Close()
 		events.EmitConnectionLog(p.appCtx, p.ID, events.LogErr, nowMillis(), "PTY allocation failed: "+err.Error())
@@ -269,7 +295,13 @@ func (p *Pane) connectSSHLike(sess profile.Session) error {
 	go p.keepaliveLoop(gen)
 	go p.probeHostInfo(client)
 	p.maybeAskSavePassword(sess)
-	p.runConnectInit(sess)
+	if runInit {
+		// OSC 7 cwd tracking only for a plain shell — tmux doesn't forward the
+		// inner shell's OSC 7 to our terminal, and a persistent session
+		// preserves its own cwd across re-attach, so the hook is both
+		// ineffective and unnecessary inside tmux.
+		p.runConnectInit(sess, launch == "")
+	}
 	return nil
 }
 
@@ -347,7 +379,7 @@ func (p *Pane) connectLocalShell(sess profile.Session) error {
 	p.setConn(nil, local)
 	p.transition(StateConnected, "")
 	go p.readLoop(p.nextGen())
-	p.runConnectInit(sess)
+	p.runConnectInit(sess, true)
 	return nil
 }
 
@@ -467,7 +499,7 @@ func (p *Pane) connectWSL(sess profile.Session) error {
 	p.setConn(nil, local)
 	p.transition(StateConnected, "")
 	go p.readLoop(p.nextGen())
-	p.runConnectInit(sess)
+	p.runConnectInit(sess, true)
 	return nil
 }
 
@@ -726,7 +758,11 @@ func (p *Pane) ResolveHostKeyChange(accept bool) error {
 // and settle at a clean prompt before we inject — injecting mid-line would
 // corrupt a half-typed command, which is why this can't be done lazily at
 // save time.
-func (p *Pane) runConnectInit(sess profile.Session) {
+//
+// doOsc7 gates step 1: callers pass false for tmux-backed persistent sessions,
+// where the inner shell's OSC 7 isn't forwarded to our terminal (so the hook
+// can't work) and the session preserves its own cwd across re-attach anyway.
+func (p *Pane) runConnectInit(sess profile.Session, doOsc7 bool) {
 	go func() {
 		select {
 		case <-time.After(250 * time.Millisecond):
@@ -736,7 +772,7 @@ func (p *Pane) runConnectInit(sess profile.Session) {
 		if pty := p.currentPTY(); pty == nil || pty.Stdin() == nil {
 			return
 		}
-		if p.cwdHookApplies(sess) {
+		if doOsc7 && p.cwdHookApplies(sess) {
 			_ = p.installOsc7Hook("cwd tracking")
 		}
 		p.writeStartupCmds(sess.StartupCmds)
@@ -1166,6 +1202,24 @@ func (p *Pane) Close() {
 	p.stopAllProcessMonitors()
 	p.teardownShell()
 	p.transition(StateDisconnected, "closed by user")
+}
+
+// CloseKill is Close plus ending the pane's persistent tmux session on the
+// remote — used when the user explicitly closes the pane/tab (the user is done
+// with it), so it isn't left running as an orphan. The kill runs first, while
+// the connection is still live; a non-persistent pane behaves exactly like
+// Close. Drops, app-quit, and workspace teardown use Close (detach-only) so
+// the session can be recovered.
+func (p *Pane) CloseKill() {
+	p.killPersistentSession()
+	p.Close()
+}
+
+// TmuxID returns the pane's stable persistence token, or "" if the pane isn't
+// a tmux-backed durable session. The frontend persists it in the workspace
+// layout so a restored pane re-attaches its own session.
+func (p *Pane) TmuxID() string {
+	return p.tmuxID
 }
 
 // readLoop streams PTY output to the frontend. Returns when the

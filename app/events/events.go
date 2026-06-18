@@ -75,6 +75,19 @@ func EmitPaneState(ctx context.Context, paneID string, state PaneState, reason s
 	safeEmit(ctx, "pane:state:"+paneID, PaneStatePayload{State: state, Reason: reason})
 }
 
+// PaneTmuxPayload is the body of pane:tmux events — whether the pane's shell
+// is running inside a durable tmux session (Phase B). The frontend shows a
+// "tmux" badge on the pane header when true.
+type PaneTmuxPayload struct {
+	Tmux bool `json:"tmux"`
+}
+
+// EmitPaneTmux tells the frontend whether the pane is tmux-backed, so it can
+// badge persistent panes. Emitted once tmux is engaged at connect.
+func EmitPaneTmux(ctx context.Context, paneID string, tmux bool) {
+	safeEmit(ctx, "pane:tmux:"+paneID, PaneTmuxPayload{Tmux: tmux})
+}
+
 // EmitConnectionLog emits a structured log entry for the given pane to the
 // frontend, and tees it into the persistent log file so connection
 // diagnostics survive past the in-app panel: err→Error, dim→Debug, ok→Info.

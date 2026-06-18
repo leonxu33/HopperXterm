@@ -49,6 +49,14 @@ type Session struct {
 
 	// Multi-line shell snippet to run after the connection opens.
 	StartupCmds string `json:"startupCmds,omitempty"`
+
+	// Persist requests a durable, server-side session (Phase B): when set
+	// and the remote has tmux, the shell runs inside a stable-named tmux
+	// session so running processes, environment, and scrollback survive a
+	// dropped connection AND an app restart (reopening re-attaches). SSH/EC2
+	// only; silently falls back to the plain auto-reconnecting shell when the
+	// remote has no tmux. See pane/persist.go.
+	Persist bool `json:"persist,omitempty"`
 }
 
 // Group is a sidebar bucket. Sessions reference it by ID via Session.GroupID.

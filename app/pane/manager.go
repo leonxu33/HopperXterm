@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"hopperxterm/events"
+	"hopperxterm/logbook"
 	"hopperxterm/profile"
 	"hopperxterm/transport"
 )
@@ -18,6 +20,15 @@ type Manager struct {
 
 	mu    sync.RWMutex
 	panes map[string]*Pane
+
+	// Durable-session bookkeeping (Phase B). appInstanceID namespaces this
+	// app instance's tmux sessions so the reaper only ever touches its own.
+	// extraKeepFn yields the tmuxIds referenced by saved workspaces (the App
+	// harvests them from the workspace store) so resumable sessions from
+	// workspaces that aren't currently open are never reaped. Both are set
+	// once at startup, before any pane opens.
+	appInstanceID string
+	extraKeepFn   func() []string
 }
 
 func NewManager(appCtx context.Context) *Manager {
@@ -26,6 +37,15 @@ func NewManager(appCtx context.Context) *Manager {
 		panes:  make(map[string]*Pane),
 	}
 }
+
+// SetAppInstanceID records the per-config-dir instance id used to namespace
+// durable tmux sessions. Call once at startup before opening panes.
+func (m *Manager) SetAppInstanceID(id string) { m.appInstanceID = id }
+
+// SetWorkspaceTmuxIDs installs a function returning every durable-session token
+// referenced by a saved workspace, so the orphan reaper keeps them. Call once
+// at startup.
+func (m *Manager) SetWorkspaceTmuxIDs(fn func() []string) { m.extraKeepFn = fn }
 
 // Open dials the session in a fresh pane. paneID must be unique — opening
 // the same paneID twice without closing in between returns an error.
@@ -44,13 +64,16 @@ func NewManager(appCtx context.Context) *Manager {
 // so the frontend doesn't double-report the error as a banner — the
 // error is already visible in the pane's own output stream.
 func (m *Manager) Open(paneID string, sess profile.Session) error {
-	return m.OpenInDir(paneID, sess, "")
+	return m.OpenInDir(paneID, sess, "", "")
 }
 
 // OpenInDir is Open with an initial working directory the shell cd's into
-// once ready — used by workspace restore to land a pane back in its saved
-// cwd. dir == "" behaves exactly like Open.
-func (m *Manager) OpenInDir(paneID string, sess profile.Session, dir string) error {
+// once ready, and a stable tmux token for durable (Persist) sessions — both
+// used by workspace restore to land a pane back in its saved cwd and re-attach
+// its own tmux session. dir == "" behaves like Open; tmuxID == "" lets a
+// persistent pane mint a fresh token (a brand-new pane with nothing to
+// restore).
+func (m *Manager) OpenInDir(paneID string, sess profile.Session, dir, tmuxID string) error {
 	m.mu.Lock()
 	if _, exists := m.panes[paneID]; exists {
 		m.mu.Unlock()
@@ -58,6 +81,15 @@ func (m *Manager) OpenInDir(paneID string, sess profile.Session, dir string) err
 	}
 	p := newPane(m.appCtx, paneID, sess)
 	p.initialDir = dir
+	p.tmuxID = tmuxID
+	// Mint the durable-session token HERE, under m.mu, for a fresh persistent
+	// pane — not later in setupPersistence (which runs on the connect goroutine
+	// without the lock), so a sibling pane's reaper reading tmuxID under
+	// m.mu.RLock never races the write.
+	if sess.Persist && p.tmuxID == "" {
+		p.tmuxID = mintTmuxID()
+	}
+	p.appInstanceID = m.appInstanceID
 	m.panes[paneID] = p
 	m.mu.Unlock()
 
@@ -65,6 +97,13 @@ func (m *Manager) OpenInDir(paneID string, sess profile.Session, dir string) err
 	// pane:output (red ANSI for terminal panes) and connection:log;
 	// keeping the pane in the map lets the user press 'r' to retry.
 	_ = p.connect(sess)
+
+	// If this pane came up as a tmux-backed durable session, opportunistically
+	// reap this instance's orphaned sessions on the same host (best-effort, off
+	// the connect path).
+	if p.tmuxLaunch != "" {
+		go m.reapOrphans(p)
+	}
 	return nil
 }
 
@@ -82,6 +121,36 @@ func (m *Manager) Close(paneID string) error {
 
 	p.Close()
 	return nil
+}
+
+// CloseKill is Close plus ending the pane's persistent tmux session on the
+// remote — used for an explicit user close of a pane/tab, so a durable
+// session isn't left as an orphan. Drops / app-quit / workspace teardown use
+// Close (detach-only) so the session survives to be recovered. No-op for an
+// unknown pane.
+func (m *Manager) CloseKill(paneID string) error {
+	m.mu.Lock()
+	p, ok := m.panes[paneID]
+	if !ok {
+		m.mu.Unlock()
+		return nil
+	}
+	delete(m.panes, paneID)
+	m.mu.Unlock()
+
+	p.CloseKill()
+	return nil
+}
+
+// TmuxID returns the pane's stable durable-session token (the frontend
+// persists it in the workspace layout). Empty string + ok means a live pane
+// that isn't tmux-backed; !ok means no such pane.
+func (m *Manager) TmuxID(paneID string) (string, bool) {
+	p, ok := m.get(paneID)
+	if !ok {
+		return "", false
+	}
+	return p.TmuxID(), true
 }
 
 // CloseAll shuts every pane down, e.g. on app exit. Best-effort; logs no
@@ -407,6 +476,77 @@ func (m *Manager) ResolveHostKeyChange(paneID string, accept bool) error {
 		return errors.New("pane: not found")
 	}
 	return p.ResolveHostKeyChange(accept)
+}
+
+// reapOrphans removes THIS instance's stale durable tmux sessions on the host
+// pane p is connected to. It only considers sessions under our own
+// hopperxterm-<appInstanceID>- prefix (so a dev build never reaps a prod
+// build's sessions on a shared remote — and vice versa), kills only DETACHED
+// ones, and skips any whose token is still referenced by an open pane (covers
+// live panes, including ones mid-reconnect) or by a saved workspace (covers
+// resumable sessions from workspaces that aren't currently open). Best-effort,
+// silent on failure, runs on its own goroutine off the connect path.
+func (m *Manager) reapOrphans(p *Pane) {
+	defer logbook.Recover("pane.reapOrphans")
+	sh := p.currentSSH()
+	if sh == nil || sh.Client == nil || p.appInstanceID == "" {
+		return
+	}
+	out, ok := transport.RunWithTimeout(sh.Client,
+		withTmuxPath("tmux list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null"),
+		6*time.Second)
+	if !ok {
+		return
+	}
+
+	prefix := instancePrefix(p.appInstanceID)
+	keep := m.keepSet()
+	var orphans []string
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) < 2 || !strings.HasPrefix(f[0], prefix) {
+			continue
+		}
+		if f[1] != "0" { // attached — never reap
+			continue
+		}
+		if keep[strings.TrimPrefix(f[0], prefix)] {
+			continue
+		}
+		orphans = append(orphans, f[0])
+	}
+	if len(orphans) == 0 {
+		return
+	}
+
+	var cmd strings.Builder
+	for _, name := range orphans {
+		cmd.WriteString("tmux kill-session -t " + transport.ShQuote(name) + " 2>/dev/null; ")
+	}
+	_, _ = transport.RunWithTimeout(sh.Client, withTmuxPath(cmd.String()), 6*time.Second)
+	events.EmitConnectionLog(m.appCtx, p.ID, events.LogDim, nowMillis(),
+		fmt.Sprintf("Cleaned up %d orphaned tmux session(s)", len(orphans)))
+}
+
+// keepSet is the set of durable-session tokens that must NOT be reaped: every
+// open pane's token plus every tmuxId referenced by a saved workspace. Tokens
+// are sanitized to the form used in tmux session names so they match the suffix
+// parsed out of a live session name.
+func (m *Manager) keepSet() map[string]bool {
+	s := map[string]bool{}
+	m.mu.RLock()
+	for _, p := range m.panes {
+		if p.tmuxID != "" {
+			s[sanitizeTmux(p.tmuxID)] = true
+		}
+	}
+	m.mu.RUnlock()
+	if m.extraKeepFn != nil {
+		for _, id := range m.extraKeepFn() {
+			s[sanitizeTmux(id)] = true
+		}
+	}
+	return s
 }
 
 func nowMillis() int64 {

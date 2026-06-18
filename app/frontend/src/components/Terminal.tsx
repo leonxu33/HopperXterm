@@ -62,6 +62,11 @@ type Props = {
    *  for word-jump and newline-insert. For SSH/EC2 the remote OS isn't known
    *  from the type alone, so it's refined by the pane:hostinfo probe. */
   sessionType?: string;
+  /** Whether this pane's shell is running inside a durable tmux session.
+   *  tmux doesn't propagate the inner shell's bracketed-paste mode to us, so
+   *  for multi-line pastes we send the bracketed-paste markers ourselves (see
+   *  doPaste) — otherwise each pasted line would execute. */
+  tmux?: boolean;
 };
 
 export function Terminal({
@@ -75,6 +80,7 @@ export function Terminal({
   macros = [],
   onRunMacro,
   sessionType,
+  tmux = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Xterm | null>(null);
@@ -88,6 +94,8 @@ export function Terminal({
   const webglRef = useRef<WebglAddon | null>(null);
   const broadcastRef = useRef(onInputBeforeSend);
   broadcastRef.current = onInputBeforeSend;
+  const tmuxRef = useRef(tmux);
+  tmuxRef.current = tmux;
   // Refs so the term.onData closure (captured once at mount) sees the
   // latest values without needing to re-create xterm.
   const stateRef = useRef(paneState);
@@ -156,20 +164,45 @@ export function Terminal({
     term?.focus();
   }, []);
 
-  // Paste clipboard text into the pane. term.paste() routes through the
-  // existing onData handler (so it broadcasts for sync-input and honors
-  // bracketed-paste); dropped while Disconnected or Reconnecting since the
-  // PTY is gone.
+  // Paste text into the pane. xterm's term.paste() honors the terminal's
+  // bracketed-paste mode (so a multi-line paste lands as one editable block
+  // instead of running line-by-line) — but ONLY when the app turned that mode
+  // on AND we can see it. tmux does NOT propagate its inner shell's
+  // bracketed-paste mode to us, so in a tmux pane xterm sees it as off and
+  // term.paste() would send raw newlines → each line executes. For a
+  // multi-line paste into a tmux pane we therefore send the bracketed-paste
+  // markers ourselves; tmux forwards them to the inner shell (bracketed paste
+  // on), so the lines are inserted, not run. Everything else uses term.paste().
+  // Dropped while Disconnected/Reconnecting (no PTY). Goes through broadcastRef
+  // + SendInput so Sync-input still fans the paste out to sibling panes.
+  const doPaste = useCallback(
+    (text: string) => {
+      const term = termRef.current;
+      if (!term || stateRef.current === 'Disconnected' || stateRef.current === 'Reconnecting') return;
+      if (text) {
+        if (tmuxRef.current && !term.modes.bracketedPasteMode && /[\r\n]/.test(text)) {
+          const body = text.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+          const seq = `\x1b[200~${body}\x1b[201~`;
+          broadcastRef.current?.(seq);
+          void SendInput(paneId, seq);
+        } else {
+          term.paste(text);
+        }
+      }
+      term.focus();
+    },
+    [paneId],
+  );
+  const doPasteRef = useRef(doPaste);
+  doPasteRef.current = doPaste;
+
+  // Read the clipboard via the Wails runtime (reliable inside WebView2) and
+  // paste it. Used by the context-menu Paste and the intercepted paste event.
   const pasteClipboard = useCallback(() => {
-    const term = termRef.current;
-    if (!term || stateRef.current === 'Disconnected' || stateRef.current === 'Reconnecting') return;
     void ClipboardGetText()
-      .then((text) => {
-        if (text) term.paste(text);
-        term.focus();
-      })
+      .then((text) => doPaste(text))
       .catch(() => {});
-  }, []);
+  }, [doPaste]);
 
   // (Re)create the WebGL renderer with a FRESH canvas. A newly-attached WebGL
   // canvas renders crisp, but *resizing* an existing one leaves blurry text on
@@ -224,6 +257,40 @@ export function Terminal({
     const search = new SearchAddon();
     term.loadAddon(search);
     searchRef.current = search;
+
+    // OSC 52 clipboard WRITE → system clipboard. Durable (tmux) panes run with
+    // `set-clipboard on`, so a mouse selection emits `OSC 52 ; <Pc> ; <base64>`;
+    // we decode it and copy to the OS clipboard via the Wails runtime, so
+    // selecting text in a tmux pane lands in the clipboard. WRITE only — reads
+    // (`Pd == "?"`) are ignored so a remote can't exfiltrate the clipboard.
+    term.parser.registerOscHandler(52, (data) => {
+      const semi = data.indexOf(';');
+      if (semi === -1) return true;
+      const payload = data.slice(semi + 1);
+      if (payload === '' || payload === '?') return true; // ignore clipboard reads
+      try {
+        const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
+        const text = new TextDecoder().decode(bytes);
+        if (text) void ClipboardSetText(text);
+      } catch {
+        /* malformed base64 — ignore */
+      }
+      return true;
+    });
+
+    // Auto-copy native selections in mouse-grabbing panes (e.g. tmux). When an
+    // app has grabbed the mouse, a plain drag is forwarded to it, so a native
+    // xterm.js selection only exists when the user held Shift to force-select
+    // (Shift bypasses mouse reporting). We copy that immediately, so Shift+drag
+    // is a one-gesture copy regardless of the remote's tmux copy bindings —
+    // which may pipe selections elsewhere and never reach the clipboard. Gated
+    // on mouse mode so normal panes keep explicit copy (Ctrl+Shift+C) and don't
+    // clobber the clipboard on every casual selection.
+    term.onSelectionChange(() => {
+      if (term.modes.mouseTrackingMode === 'none') return;
+      const sel = term.getSelection();
+      if (sel) void ClipboardSetText(sel);
+    });
 
     term.open(containerRef.current);
     // Apply internal padding directly to the .xterm element — FitAddon
@@ -445,6 +512,21 @@ export function Terminal({
     const onClick = () => term.focus();
     containerRef.current.addEventListener('click', onClick);
 
+    // Intercept paste (Ctrl/Cmd+V, Shift+Insert, middle-click) before xterm's
+    // own handler so multi-line pastes into tmux panes get bracketed (see
+    // doPaste). Capture phase on the container runs ahead of xterm's textarea
+    // listener; we read the text via the Wails clipboard (reliable in WebView2)
+    // rather than the event payload, so we always prevent xterm's default paste
+    // and do it ourselves.
+    const onPasteEvent = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      void ClipboardGetText()
+        .then((t) => doPasteRef.current(t))
+        .catch(() => {});
+    };
+    containerRef.current.addEventListener('paste', onPasteEvent, true);
+
     // Subscribe to output events from the matching pane.
     const off = EventsOn(`pane:output:${paneId}`, (payload: { data: string }) => {
       term.write(payload.data);
@@ -544,6 +626,7 @@ export function Terminal({
       off();
       offHost();
       containerRef.current?.removeEventListener('click', onClick);
+      containerRef.current?.removeEventListener('paste', onPasteEvent, true);
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

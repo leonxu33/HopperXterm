@@ -222,18 +222,25 @@ func (p *Pane) reconnectLoop(reason string) {
 // Returns false (closing the client) if the PTY allocation fails so the
 // caller keeps retrying.
 func (p *Pane) resumeSSHSession(client *ssh.Client) bool {
-	shell, err := transport.StartShell(client)
+	// Persistent (tmux-backed) panes replay the attach-or-create command, so
+	// the re-dial lands back in the SAME tmux session — running processes,
+	// environment, and scrollback intact. Plain panes get a fresh login shell.
+	shell, err := transport.StartShellCmd(client, p.tmuxLaunch)
 	if err != nil {
 		_ = client.Close()
 		return false
 	}
 
-	// Land the new shell back where the old one was. Running processes
-	// can't survive a reconnect in Phase A, but the directory can.
-	p.cwdMu.RLock()
-	cwd := p.lastCwd
-	p.cwdMu.RUnlock()
-	p.initialDir = cwd
+	persistent := p.tmuxLaunch != ""
+	if !persistent {
+		// Phase A: a fresh shell can't keep running processes, but it can land
+		// back in the last-known directory. (tmux preserves its own cwd, so
+		// persistent panes skip this.)
+		p.cwdMu.RLock()
+		cwd := p.lastCwd
+		p.cwdMu.RUnlock()
+		p.initialDir = cwd
+	}
 
 	p.setConn(shell, shell)
 	p.reconnMu.Lock()
@@ -249,7 +256,11 @@ func (p *Pane) resumeSSHSession(client *ssh.Client) bool {
 	go p.readLoop(gen)
 	go p.keepaliveLoop(gen)
 	go p.probeHostInfo(client)
-	p.runConnectInit(p.sess)
+	// Re-attaching a live tmux session needs no init — it's already set up,
+	// and injecting cwd/startup commands could corrupt a running command.
+	if !persistent {
+		p.runConnectInit(p.sess, true)
+	}
 	return true
 }
 

@@ -193,8 +193,17 @@ func (s *Shell) Close() error {
 
 // StartShell allocates a PTY (xterm-256color, 80x24 by default), pipes
 // stderr into the same stream as stdout, and launches the user's login
-// shell.
+// shell. It's the command == "" case of StartShellCmd.
 func StartShell(client *ssh.Client) (*Shell, error) {
+	return StartShellCmd(client, "")
+}
+
+// StartShellCmd is StartShell with an optional command: when command != ""
+// the PTY runs that command instead of the interactive login shell (used by
+// durable sessions, which exec a `tmux new-session -A` so the shell survives
+// a dropped channel). command == "" launches the login shell exactly as
+// StartShell does.
+func StartShellCmd(client *ssh.Client, command string) (*Shell, error) {
 	sess, err := client.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("transport: new session: %w", err)
@@ -220,7 +229,11 @@ func StartShell(client *ssh.Client) (*Shell, error) {
 		return nil, fmt.Errorf("transport: stdin pipe: %w", err)
 	}
 
-	if err := sess.Shell(); err != nil {
+	start := sess.Shell
+	if command != "" {
+		start = func() error { return sess.Start(command) }
+	}
+	if err := start(); err != nil {
 		sess.Close()
 		return nil, fmt.Errorf("transport: start shell: %w", err)
 	}

@@ -27,9 +27,11 @@ import {
   OpenPane,
   OpenPaneInDir,
   ClosePane,
+  ClosePaneKill,
   ReleaseAllPanes,
   SendInput,
   GetPaneCwd,
+  GetPaneTmux,
   ListWorkspaces,
   SaveWorkspace,
   DeleteWorkspace,
@@ -256,6 +258,9 @@ function App() {
     if (activeWorkspaceId) activeTabByWsRef.current[activeWorkspaceId] = activeTabId;
   }, [activeTabId, activeWorkspaceId]);
   const [paneStates, setPaneStates] = useState<PaneStates>({});
+  // Per-pane "is this shell running inside a durable tmux session" flag, fed by
+  // pane:tmux events; drives the "tmux" badge on the pane header.
+  const [paneTmux, setPaneTmux] = useState<Record<string, boolean>>({});
   const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
 
   // The Resource Monitor / Remote Files views now live INSIDE panes as
@@ -509,6 +514,9 @@ function App() {
       const offState = EventsOn(`pane:state:${paneId}`, (p: { state: PaneState }) => {
         setPaneStates((cur) => ({ ...cur, [paneId]: p.state }));
       });
+      const offTmux = EventsOn(`pane:tmux:${paneId}`, (p: { tmux: boolean }) => {
+        setPaneTmux((cur) => ({ ...cur, [paneId]: p.tmux }));
+      });
       const offLog = EventsOn(`connection:log:${paneId}`, (p: LogEntry) => {
         setLogs((cur) => ({ ...cur, [paneId]: [...(cur[paneId] || []), p].slice(-100) }));
       });
@@ -551,6 +559,7 @@ function App() {
       );
       disposersRef.current[paneId] = () => {
         offState();
+        offTmux();
         offLog();
         offAskSave();
         offAsk();
@@ -562,6 +571,12 @@ function App() {
         disposersRef.current[id]();
         delete disposersRef.current[id];
         setPaneStates((cur) => {
+          if (!(id in cur)) return cur;
+          const next = { ...cur };
+          delete next[id];
+          return next;
+        });
+        setPaneTmux((cur) => {
           if (!(id in cur)) return cur;
           const next = { ...cur };
           delete next[id];
@@ -1144,7 +1159,8 @@ function App() {
   };
 
   const closePane = async (tabId: string, paneId: string) => {
-    await ClosePane(paneId);
+    // Explicit user close → end a durable tmux session (don't leave an orphan).
+    await ClosePaneKill(paneId);
     let willCloseTab = false;
     setTabs((cur) => {
       const next = cur
@@ -1302,7 +1318,8 @@ function App() {
     if (!tab) return;
     const paneN = paneCount(tab.layout);
     const reallyClose = async () => {
-      for (const leaf of paneLeaves(tab.layout)) await ClosePane(leaf.id);
+      // Explicit user close → end any durable tmux sessions these panes hold.
+      for (const leaf of paneLeaves(tab.layout)) await ClosePaneKill(leaf.id);
       // Any transient sessions this tab held are dropped by the orphan-GC
       // effect once the tab leaves `tabs` — no per-tab cleanup needed here.
       setTabs((cur) => {
@@ -1360,7 +1377,8 @@ function App() {
     const reallyCloseAll = async () => {
       for (const pid of allPaneIds) {
         try {
-          await ClosePane(pid);
+          // Explicit user close-all → end durable tmux sessions too.
+          await ClosePaneKill(pid);
         } catch {
           /* idempotent — ignore */
         }
@@ -1474,6 +1492,9 @@ function App() {
     if (!meta) return null;
     const wsTabs = tabs.filter((t) => t.workspaceId === wsId && !tempTabIds.has(t.id));
     const cwds = new Map<string, string>();
+    // Durable-session token per pane, persisted so a restored persistent pane
+    // re-attaches its OWN tmux session (empty for non-durable panes).
+    const tmux = new Map<string, string>();
     await Promise.all(
       wsTabs.flatMap((t) =>
         paneLeaves(t.layout)
@@ -1485,13 +1506,20 @@ function App() {
             } catch {
               /* pane closed or no cwd yet — skip */
             }
+            try {
+              const tid = await GetPaneTmux(l.id);
+              if (tid) tmux.set(l.id, tid);
+            } catch {
+              /* pane closed or not durable — skip */
+            }
           }),
       ),
     );
     const outTabs: WorkspaceTab[] = [];
     for (const t of wsTabs) {
       const layout = filterLeaves(t.layout, (leaf) => isKnownSession(leaf.sessionId));
-      if (layout) outTabs.push({ label: t.label, layout: toWsNode(layout, (id) => cwds.get(id)) });
+      if (layout)
+        outTabs.push({ label: t.label, layout: toWsNode(layout, (id) => cwds.get(id), (id) => tmux.get(id)) });
     }
     return {
       id: meta.id,
@@ -1549,13 +1577,17 @@ function App() {
     if (!ws || !ws.tabs || ws.tabs.length === 0) return [];
     const newTabs: Tab[] = [];
     const newActiveByTab: Record<string, string> = {};
-    // Restore-cwd per fresh pane id (ids are globally unique), consumed by the
-    // OpenPaneInDir loop below.
+    // Restore-cwd + durable tmux token per fresh pane id (ids are globally
+    // unique), consumed by the OpenPaneInDir loop below.
     const restoreCwd = new Map<string, string>();
+    const restoreTmux = new Map<string, string>();
     for (const wt of ws.tabs) {
       // Accepts the new tree shape or the legacy column array; both yield a
-      // live layout with fresh pane ids. onLeaf collects any saved cwd.
-      const layout = loadWsLayout(wt.layout, () => newId('pane'), (id, cwd) => restoreCwd.set(id, cwd));
+      // live layout with fresh pane ids. onLeaf collects any saved cwd + tmux id.
+      const layout = loadWsLayout(wt.layout, () => newId('pane'), (id, cwd, tmuxId) => {
+        if (cwd) restoreCwd.set(id, cwd);
+        if (tmuxId) restoreTmux.set(id, tmuxId);
+      });
       if (!layout) continue;
       const firstCell = paneLeaves(layout)[0] ?? null;
       const sourceSession = firstCell ? snap.sessions.find((s) => s.id === firstCell.sessionId) : null;
@@ -1576,11 +1608,14 @@ function App() {
     setActivePaneByTab((cur) => ({ ...cur, ...newActiveByTab }));
     for (const tab of newTabs) {
       for (const leaf of paneLeaves(tab.layout)) {
-        // Reopen in the saved cwd when we have one; OpenPaneInDir with an
-        // empty dir is identical to OpenPane.
-        OpenPaneInDir(leaf.id, leaf.sessionId, restoreCwd.get(leaf.id) ?? '').catch((e) =>
-          setErr(`OpenPane ${leaf.sessionId}: ${String(e)}`),
-        );
+        // Reopen in the saved cwd + re-attach the saved durable session when we
+        // have them; OpenPaneInDir with empty dir/tmuxId is identical to OpenPane.
+        OpenPaneInDir(
+          leaf.id,
+          leaf.sessionId,
+          restoreCwd.get(leaf.id) ?? '',
+          restoreTmux.get(leaf.id) ?? '',
+        ).catch((e) => setErr(`OpenPane ${leaf.sessionId}: ${String(e)}`));
       }
     }
     return newTabs;
@@ -1803,13 +1838,18 @@ function App() {
   };
 
   // Debounced auto-save of the active workspace whenever its tabs/layout change.
+  // Also keyed on paneTmux: a durable pane's tmuxId is minted on the backend at
+  // connect and arrives via the pane:tmux event (which updates paneTmux, not
+  // tabs). Re-running the save when it lands persists the tmuxId into the
+  // layout — otherwise a quick quit could save tmuxId="" and the pane would
+  // mint a new token (orphaning, then reaping, the prior session) on restart.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!activeWorkspaceId || !instantiatedRef.current.has(activeWorkspaceId)) return;
     const h = setTimeout(() => void flushWorkspaceSaves(), 600);
     return () => clearTimeout(h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabs, activeWorkspaceId]);
+  }, [tabs, activeWorkspaceId, paneTmux]);
 
   // Launch: restore the last-active workspace (or first, or create a default)
   // and instantiate it — reconnecting its tabs. Runs once on mount.
@@ -2935,6 +2975,7 @@ function App() {
                             return {
                               label: s?.label || s?.host || '(unnamed)',
                               type: s?.type || 'shell',
+                              tmux: !!paneTmux[cell.id],
                             };
                           }}
                           onPanelsChange={(paneId, panels) => setPanePanels(t.id, paneId, panels)}
@@ -2990,6 +3031,7 @@ function App() {
                                 paneId={cell.id}
                                 paneState={paneStates[cell.id]}
                                 sessionType={cellSession?.type}
+                                tmux={!!paneTmux[cell.id]}
                                 active={t.id === activeTabId}
                                 activePane={activePane}
                                 onReconnect={() => void reloadPane(t.id, cell.id)}

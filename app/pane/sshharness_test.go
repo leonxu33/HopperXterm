@@ -38,6 +38,125 @@ type paneSSHServer struct {
 
 	connMu sync.Mutex
 	conns  []*ssh.ServerConn // live connections, for DropConnections
+
+	// Durable-session (tmux) simulation. When tmuxInstalled is true the
+	// detection probe answers with the marker (plus HOP_TMUX_HAS when the
+	// queried session already exists in tmuxSessions). A `new-session -A`
+	// exec creates the session (persists across detach, like real tmux);
+	// `kill-session` or an `exit` in the shell destroys it. execLog records
+	// every exec the client ran and shellReqs counts plain shell requests, so
+	// tests can assert which launch path was taken.
+	stateMu       sync.Mutex
+	tmuxInstalled bool
+	tmuxSessions  map[string]bool
+	tmuxAttached  map[string]ssh.Channel // session name → its live attach channel
+	execLog       []string
+	shellReqs     int
+}
+
+func (s *paneSSHServer) setTmux(installed bool) {
+	s.stateMu.Lock()
+	s.tmuxInstalled = installed
+	s.tmuxSessions = map[string]bool{}
+	s.tmuxAttached = map[string]ssh.Channel{}
+	s.stateMu.Unlock()
+}
+
+// killSessionExternally simulates `tmux kill-session` run from outside
+// HopperXterm (another terminal, or the session dying) while a pane is
+// attached: the session is destroyed AND its attach channel is closed (the
+// tmux client exits), but the SSH connection stays up. Mimics the client
+// exiting cleanly with an exit-status, so the pane sees a clean close rather
+// than a transport error.
+func (s *paneSSHServer) killSessionExternally(name string) {
+	s.stateMu.Lock()
+	delete(s.tmuxSessions, name)
+	ch := s.tmuxAttached[name]
+	delete(s.tmuxAttached, name)
+	s.stateMu.Unlock()
+	if ch != nil {
+		var b [4]byte
+		_, _ = ch.SendRequest("exit-status", false, b[:])
+		_ = ch.Close()
+	}
+}
+
+func (s *paneSSHServer) tmuxHas(name string) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.tmuxSessions[name]
+}
+
+func (s *paneSSHServer) tmuxAdd(name string) {
+	s.stateMu.Lock()
+	if s.tmuxSessions == nil {
+		s.tmuxSessions = map[string]bool{}
+	}
+	s.tmuxSessions[name] = true
+	s.stateMu.Unlock()
+}
+
+func (s *paneSSHServer) tmuxDel(name string) {
+	s.stateMu.Lock()
+	delete(s.tmuxSessions, name)
+	s.stateMu.Unlock()
+}
+
+func (s *paneSSHServer) setAttached(name string, ch ssh.Channel) {
+	s.stateMu.Lock()
+	if s.tmuxAttached == nil {
+		s.tmuxAttached = map[string]ssh.Channel{}
+	}
+	s.tmuxAttached[name] = ch
+	s.stateMu.Unlock()
+}
+
+func (s *paneSSHServer) clearAttached(name string, ch ssh.Channel) {
+	s.stateMu.Lock()
+	if s.tmuxAttached[name] == ch {
+		delete(s.tmuxAttached, name)
+	}
+	s.stateMu.Unlock()
+}
+
+// tmuxCount returns how many live sessions match the hopperxterm prefix.
+func (s *paneSSHServer) tmuxCount() int {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	n := 0
+	for name := range s.tmuxSessions {
+		if strings.HasPrefix(name, "hopperxterm-") {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *paneSSHServer) execs() []string {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return append([]string(nil), s.execLog...)
+}
+
+func (s *paneSSHServer) shellCount() int {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.shellReqs
+}
+
+// tmuxArgAfter extracts the whitespace-delimited token following marker in a
+// tmux command line (stripping single quotes), e.g. the session name after
+// "new-session -A -s ". Returns "" when the marker isn't present.
+func tmuxArgAfter(cmd, marker string) string {
+	i := strings.Index(cmd, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(cmd[i+len(marker):])
+	if j := strings.IndexByte(rest, ' '); j >= 0 {
+		rest = rest[:j]
+	}
+	return strings.Trim(rest, "'")
 }
 
 // DropConnections closes every live SSH connection while leaving the
@@ -140,11 +259,11 @@ func (s *paneSSHServer) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 		if err != nil {
 			return
 		}
-		go paneHandleSession(ch, creqs)
+		go s.handleSession(ch, creqs)
 	}
 }
 
-func paneHandleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
+func (s *paneSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 	for req := range reqs {
 		switch req.Type {
 		case "pty-req", "window-change", "env":
@@ -155,12 +274,15 @@ func paneHandleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			if req.WantReply {
 				_ = req.Reply(true, nil)
 			}
+			s.stateMu.Lock()
+			s.shellReqs++
+			s.stateMu.Unlock()
 			go paneShellLoop(ch)
 		case "exec":
 			if req.WantReply {
 				_ = req.Reply(true, nil)
 			}
-			go paneRunExec(ch, decodeReqString(req.Payload))
+			go s.runExec(ch, decodeReqString(req.Payload))
 		case "subsystem":
 			if decodeReqString(req.Payload) == "sftp" {
 				if req.WantReply {
@@ -211,10 +333,103 @@ func paneShellLoop(ch ssh.Channel) {
 	}
 }
 
-func paneRunExec(ch ssh.Channel, cmd string) {
+func (s *paneSSHServer) runExec(ch ssh.Channel, cmd string) {
 	defer ch.Close()
+	s.stateMu.Lock()
+	s.execLog = append(s.execLog, cmd)
+	s.stateMu.Unlock()
+
 	if strings.Contains(cmd, "HOPPERPROBE") {
 		_, _ = io.WriteString(ch, cannedProbe)
+		var b [4]byte
+		_, _ = ch.SendRequest("exit-status", false, b[:])
+		return
+	}
+	// NOTE: the launch command embeds a `command -v tmux && exec tmux …
+	// new-session …` guard, so it contains BOTH "command -v tmux" and
+	// "new-session -A -s". Match the launch (new-session) FIRST so the guard
+	// substring doesn't misroute it to the detection branch below. The
+	// detection probe has "has-session", never "new-session", so the two stay
+	// disjoint.
+	//
+	// A durable pane's shell runs via exec (`tmux new-session -A …`) rather
+	// than a plain shell request. Create the session (it now persists across a
+	// detach, like real tmux), then behave like an interactive shell so the
+	// pane's read/keepalive loops and clean-exit detection work as usual. An
+	// `exit` destroys the session (last shell gone); a dropped channel leaves
+	// it running so a reconnect can re-attach.
+	if name := tmuxArgAfter(cmd, "new-session -A -s "); name != "" {
+		s.tmuxAdd(name)
+		s.setAttached(name, ch)
+		defer s.clearAttached(name, ch)
+		buf := make([]byte, 1024)
+		var line []byte
+		for {
+			n, err := ch.Read(buf)
+			if n > 0 {
+				_, _ = ch.Write(buf[:n])
+				line = append(line, buf[:n]...)
+				if bytes.Contains(line, []byte("exit")) {
+					s.tmuxDel(name)
+					var b [4]byte
+					_, _ = ch.SendRequest("exit-status", false, b[:])
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+	// tmux availability + existence probe (durable sessions): echo the marker
+	// iff tmux is "installed", plus HOP_TMUX_HAS when the queried session
+	// already exists on this fake remote.
+	if strings.Contains(cmd, "command -v tmux") {
+		s.stateMu.Lock()
+		installed := s.tmuxInstalled
+		s.stateMu.Unlock()
+		if installed {
+			_, _ = io.WriteString(ch, tmuxDetectMarker+"\n")
+			if s.tmuxHas(tmuxArgAfter(cmd, "has-session -t ")) {
+				_, _ = io.WriteString(ch, tmuxHasMarker+"\n")
+			}
+		}
+		var b [4]byte
+		_, _ = ch.SendRequest("exit-status", false, b[:])
+		return
+	}
+	// `tmux list-sessions` (the orphan reaper): report every live session and
+	// whether it has an attached client.
+	if strings.Contains(cmd, "list-sessions") {
+		s.stateMu.Lock()
+		for name := range s.tmuxSessions {
+			att := "0"
+			if s.tmuxAttached[name] != nil {
+				att = "1"
+			}
+			_, _ = io.WriteString(ch, name+" "+att+"\n")
+		}
+		s.stateMu.Unlock()
+		var b [4]byte
+		_, _ = ch.SendRequest("exit-status", false, b[:])
+		return
+	}
+	// `tmux kill-session -t <name>` (explicit user close OR the reaper, which
+	// batches several `kill-session` in one command): destroy each named session.
+	if strings.Contains(cmd, "kill-session -t") {
+		rest := cmd
+		for {
+			i := strings.Index(rest, "kill-session -t ")
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len("kill-session -t "):]
+			name := rest
+			if j := strings.IndexAny(name, " ;"); j >= 0 {
+				name = name[:j]
+			}
+			s.tmuxDel(strings.Trim(name, "'"))
+		}
 		var b [4]byte
 		_, _ = ch.SendRequest("exit-status", false, b[:])
 		return

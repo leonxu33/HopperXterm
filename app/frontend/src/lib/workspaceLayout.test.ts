@@ -42,7 +42,7 @@ describe('wsNodeToLayout / loadWsLayout — restore cwd', () => {
     };
     let n = 0;
     const seen = new Map<string, string>();
-    const layout = loadWsLayout(raw, () => `np${++n}`, (id, cwd) => seen.set(id, cwd));
+    const layout = loadWsLayout(raw, () => `np${++n}`, (id, cwd) => cwd && seen.set(id, cwd));
     // Only the leaf with a saved cwd is reported, keyed by its new id.
     expect(seen.size).toBe(1);
     expect(seen.get('np1')).toBe('/srv/app');
@@ -60,8 +60,19 @@ describe('wsNodeToLayout / loadWsLayout — restore cwd', () => {
     const live: PaneNode = { kind: 'leaf', id: 'p1', sessionId: 's1', weight: 1 };
     const serialized = toWsNode(live, () => '/home/u');
     const seen = new Map<string, string>();
-    loadWsLayout(serialized, () => 'fresh', (id, cwd) => seen.set(id, cwd));
+    loadWsLayout(serialized, () => 'fresh', (id, cwd) => cwd && seen.set(id, cwd));
     expect(seen.get('fresh')).toBe('/home/u');
+  });
+
+  it('round-trips a durable tmux id through serialize → deserialize', () => {
+    const live: PaneNode = { kind: 'leaf', id: 'p1', sessionId: 's1', weight: 1 };
+    // tmuxId is reported even when there's no saved cwd.
+    const serialized = toWsNode(live, undefined, () => 'tok-abc') as Extract<WsNode, { kind: 'leaf' }>;
+    expect(serialized.tmuxId).toBe('tok-abc');
+    expect('cwd' in serialized).toBe(false);
+    const tmux = new Map<string, string>();
+    loadWsLayout(serialized, () => 'fresh', (id, _cwd, tmuxId) => tmuxId && tmux.set(id, tmuxId));
+    expect(tmux.get('fresh')).toBe('tok-abc');
   });
 });
 

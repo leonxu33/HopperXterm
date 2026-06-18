@@ -804,7 +804,7 @@ func (s *SFTP) ensureIDMaps() {
 		load := func(query, file string) map[string]string {
 			out := ""
 			if s.Client != nil {
-				out, _ = runWithTimeout(s.Client, query, 3*time.Second)
+				out, _ = RunWithTimeout(s.Client, query, 3*time.Second)
 			}
 			if strings.TrimSpace(out) == "" {
 				out = s.readRemoteText(file)

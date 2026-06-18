@@ -8,6 +8,7 @@ import (
 	"os"
 	goruntime "runtime"
 
+	"hopperxterm/appdir"
 	"hopperxterm/credentials"
 	"hopperxterm/events"
 	"hopperxterm/extedit"
@@ -86,6 +87,14 @@ func (a *App) startup(ctx context.Context) {
 		ws = workspace.NewInMemory()
 	}
 	a.workspaces = ws
+
+	// Durable sessions (Phase B): namespace this app instance's tmux sessions
+	// (dev vs prod config dirs get distinct ids) and teach the pane manager
+	// which durable-session tokens are still referenced by a saved workspace,
+	// so its orphan reaper keeps resumable sessions and never touches another
+	// instance's. Both must be set before any pane opens.
+	a.panes.SetAppInstanceID(appdir.InstanceID())
+	a.panes.SetWorkspaceTmuxIDs(a.workspaceTmuxIDs)
 
 	mc, err := macro.OpenDefault()
 	if err != nil {
@@ -203,17 +212,19 @@ func (a *App) ReorderGroup(id, beforeGroupID string) error {
 // output stream over Wails events (pane:state:{paneId},
 // pane:output:{paneId}, connection:log:{paneId}).
 func (a *App) OpenPane(paneID, sessionID string) error {
-	return a.openPaneIn(paneID, sessionID, "")
+	return a.openPaneIn(paneID, sessionID, "", "")
 }
 
-// OpenPaneInDir is OpenPane with an initial working directory the shell
-// cd's into once ready. Used by workspace restore to reopen each pane in
-// its saved cwd; dir == "" behaves exactly like OpenPane.
-func (a *App) OpenPaneInDir(paneID, sessionID, dir string) error {
-	return a.openPaneIn(paneID, sessionID, dir)
+// OpenPaneInDir is OpenPane with an initial working directory the shell cd's
+// into once ready and a stable tmux token for durable (Persist) sessions.
+// Used by workspace restore to reopen each pane in its saved cwd and re-attach
+// its OWN tmux session; dir == "" behaves like OpenPane, and tmuxID == "" lets
+// a persistent pane mint a fresh token (nothing to restore yet).
+func (a *App) OpenPaneInDir(paneID, sessionID, dir, tmuxID string) error {
+	return a.openPaneIn(paneID, sessionID, dir, tmuxID)
 }
 
-func (a *App) openPaneIn(paneID, sessionID, dir string) error {
+func (a *App) openPaneIn(paneID, sessionID, dir, tmuxID string) error {
 	if paneID == "" || sessionID == "" {
 		return fmt.Errorf("OpenPane: paneId and sessionId required")
 	}
@@ -221,14 +232,23 @@ func (a *App) openPaneIn(paneID, sessionID, dir string) error {
 	if !ok {
 		return fmt.Errorf("OpenPane: session %s not found", sessionID)
 	}
-	return a.panes.OpenInDir(paneID, sess, dir)
+	return a.panes.OpenInDir(paneID, sess, dir, tmuxID)
 }
 
-// ClosePane terminates the pane's SSH session and cleans up its goroutines.
-// Idempotent: closing an unknown pane is a no-op. Any external-edit sessions
-// bound to the pane are stopped too (their temp copies removed). Reconnect
-// goes through pane.Manager.Close directly, not here, so edits survive a
-// reconnect.
+// GetPaneTmux returns the pane's durable-session token so the frontend can
+// persist it in the workspace layout (and pass it back to OpenPaneInDir on
+// restore). Empty for a non-durable pane or an unknown one.
+func (a *App) GetPaneTmux(paneID string) (string, error) {
+	id, _ := a.panes.TmuxID(paneID)
+	return id, nil
+}
+
+// ClosePane terminates the pane's SSH session and cleans up its goroutines,
+// but only *detaches* a durable tmux session (it keeps running on the remote
+// so a later reopen can re-attach). Used for transient teardown — workspace
+// deactivate/reload, pane moves/swaps. Idempotent. Any external-edit sessions
+// bound to the pane are stopped too. Reconnect goes through pane.Manager.Close
+// directly, not here, so edits survive a reconnect.
 func (a *App) ClosePane(paneID string) error {
 	if a.extedit != nil {
 		a.extedit.StopForPane(paneID)
@@ -236,10 +256,24 @@ func (a *App) ClosePane(paneID string) error {
 	return a.panes.Close(paneID)
 }
 
+// ClosePaneKill is ClosePane for an explicit user close of a pane/tab: it also
+// ends a durable tmux session on the remote (kill-session) so it isn't left as
+// an orphan. The frontend calls this from the close-pane / close-tab actions;
+// drops, app-quit, reload, and workspace teardown use ClosePane so the session
+// can be recovered.
+func (a *App) ClosePaneKill(paneID string) error {
+	if a.extedit != nil {
+		a.extedit.StopForPane(paneID)
+	}
+	return a.panes.CloseKill(paneID)
+}
+
 // ReconnectPane closes the existing pane and re-opens it against the
 // same session. Used after a disconnect when the user wants to retry —
 // the frontend triggers this when the user presses 'r' in a
-// Disconnected terminal pane.
+// Disconnected terminal pane. The durable-session token is preserved so the
+// retry re-attaches the SAME tmux session (recreating it only if it's gone),
+// rather than minting a new one.
 func (a *App) ReconnectPane(paneID string) error {
 	if paneID == "" {
 		return fmt.Errorf("ReconnectPane: paneId required")
@@ -248,8 +282,9 @@ func (a *App) ReconnectPane(paneID string) error {
 	if !ok {
 		return fmt.Errorf("ReconnectPane: pane %s not found", paneID)
 	}
+	tmuxID, _ := a.panes.TmuxID(paneID)
 	_ = a.panes.Close(paneID)
-	return a.OpenPane(paneID, sessionID)
+	return a.openPaneIn(paneID, sessionID, "", tmuxID)
 }
 
 // SendInput forwards a keystroke (or paste) to the pane's remote PTY.
@@ -664,6 +699,40 @@ func (a *App) ListWSLDistros() ([]string, error) {
 // order (case-insensitive name).
 func (a *App) ListWorkspaces() []workspace.Workspace {
 	return a.workspaces.List()
+}
+
+// workspaceTmuxIDs returns every durable-session token (WsNode.tmuxId) saved in
+// any workspace layout, so the pane manager's orphan reaper preserves sessions
+// a not-currently-open workspace could still resume. The layout schema is
+// frontend-owned and opaque to Go (Tab.Layout is interface{}), so we just walk
+// the decoded JSON harvesting "tmuxId" string fields wherever they appear.
+func (a *App) workspaceTmuxIDs() []string {
+	if a.workspaces == nil {
+		return nil
+	}
+	var ids []string
+	for _, w := range a.workspaces.List() {
+		for _, t := range w.Tabs {
+			collectTmuxIDs(t.Layout, &ids)
+		}
+	}
+	return ids
+}
+
+func collectTmuxIDs(node interface{}, out *[]string) {
+	switch v := node.(type) {
+	case map[string]interface{}:
+		if id, ok := v["tmuxId"].(string); ok && id != "" {
+			*out = append(*out, id)
+		}
+		for _, child := range v {
+			collectTmuxIDs(child, out)
+		}
+	case []interface{}:
+		for _, child := range v {
+			collectTmuxIDs(child, out)
+		}
+	}
 }
 
 // SaveWorkspace upserts a workspace by ID. The frontend supplies the

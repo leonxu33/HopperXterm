@@ -49,6 +49,10 @@ export type NewSessionDraft = {
    * files (or the default chain when empty). */
   awsProfile?: string;
   startupCmds?: string;
+  /** Keep the session alive server-side (Phase B): run the shell inside a
+   * tmux session so running processes survive a dropped connection and an
+   * app restart. SSH/EC2 only; ignored when the remote has no tmux. */
+  persist?: boolean;
 };
 
 type Group = { id: string; name: string };
@@ -237,6 +241,7 @@ export function NewSessionModal({
       : undefined;
   const [startupCmds, setStartupCmds] = useState(existing?.startupCmds ?? '');
   const [showStartup, setShowStartup] = useState(!!existing?.startupCmds?.trim());
+  const [persist, setPersist] = useState(existing?.persist ?? false);
   // In edit mode we want to show the saved label verbatim (so the user
   // sees what's about to be changed); in create mode the field stays
   // empty so the placeholder shows the auto-derived suggestion.
@@ -318,6 +323,7 @@ export function NewSessionModal({
         startupCmds.trim()
           ? startupCmds
           : undefined,
+      persist: (type === 'ssh' || type === 'awsec2') && persist ? true : undefined,
     });
   };
 
@@ -602,6 +608,11 @@ export function NewSessionModal({
           </div>
         )}
 
+        {/* Keep alive (tmux-backed durable session) — SSH / EC2 only. */}
+        {(type === 'ssh' || type === 'awsec2') && (
+          <PersistToggle value={persist} onChange={setPersist} />
+        )}
+
         {/* Run commands on connect — terminal session types only. Mirrors
             StartupCommands in hopperterm-core.jsx:2762. */}
         {(type === 'ssh' || type === 'shell' || type === 'wsl' || type === 'awsec2') && (
@@ -615,6 +626,71 @@ export function NewSessionModal({
         )}
       </div>
     </Modal>
+  );
+}
+
+// PersistToggle — a labelled switch (matching the workspace status switch)
+// that opts the session into a durable, tmux-backed server-side session.
+function PersistToggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 12,
+        padding: '10px 12px',
+        borderRadius: 9,
+        background: value ? 'rgba(125,240,196,0.05)' : 'rgba(255,255,255,0.03)',
+        boxShadow: `inset 0 0 0 1px ${value ? TOKENS.accentSoft : TOKENS.border}`,
+        transition: 'background .12s, box-shadow .12s',
+      }}
+    >
+      <button
+        type="button"
+        role="switch"
+        aria-checked={value}
+        aria-label="Keep session alive"
+        onClick={() => onChange(!value)}
+        style={{ padding: 0, border: 0, background: 'transparent', cursor: 'pointer', flex: '0 0 auto', marginTop: 1 }}
+      >
+        <span
+          style={{
+            position: 'relative',
+            display: 'block',
+            width: 38,
+            height: 22,
+            borderRadius: 11,
+            background: value ? TOKENS.accent : 'rgba(255,255,255,0.14)',
+            boxShadow: value ? 'none' : `inset 0 0 0 1px ${TOKENS.border}`,
+            transition: 'background .15s',
+          }}
+        >
+          <span
+            style={{
+              position: 'absolute',
+              top: 2,
+              left: 2,
+              width: 18,
+              height: 18,
+              borderRadius: '50%',
+              background: value ? '#06120e' : TOKENS.fgDim,
+              transform: value ? 'translateX(16px)' : 'translateX(0)',
+              transition: 'transform .15s, background .15s',
+            }}
+          />
+        </span>
+      </button>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <div style={{ font: `600 ${FS.lg}px/1 ${TOKENS.font}`, color: value ? TOKENS.accent : TOKENS.fg }}>
+          Keep session alive
+        </div>
+        <div style={{ font: `${FS.base}px/1.4 ${TOKENS.font}`, color: TOKENS.fgMute }}>
+          Runs the shell inside <span style={{ fontFamily: TOKENS.mono, color: TOKENS.fgDim }}>tmux</span> so running
+          processes and scrollback survive a dropped connection — and reattach after an app restart. Falls back to plain
+          auto-reconnect if the remote has no tmux.
+        </div>
+      </div>
+    </div>
   );
 }
 
