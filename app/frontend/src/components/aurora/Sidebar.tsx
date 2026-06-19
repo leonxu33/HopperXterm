@@ -34,6 +34,8 @@ export type Session = {
   instanceId?: string;
   region?: string;
   awsProfile?: string;
+  // Saved keep-alive (tmux-backed durable session) default — SSH / EC2 only.
+  persist?: boolean;
 };
 
 type Props = {
@@ -41,8 +43,11 @@ type Props = {
   sessions: Session[];
   selectedSessionId: string | null;
   onSelectSession: (s: Session | null) => void;
-  onOpenSession: (s: Session) => void;
-  onOpenInCurrentTab?: (s: Session) => void;
+  // keepAlive (when passed) overrides the session's saved keep-alive default
+  // for this launch only — wired to the "Open keep-alive…" / "Open w/o
+  // keep-alive…" context-menu actions.
+  onOpenSession: (s: Session, keepAlive?: boolean) => void;
+  onOpenInCurrentTab?: (s: Session, keepAlive?: boolean) => void;
   onDuplicateSession?: (s: Session) => void;
   onAddGroup: () => void;
   onAddSession: (groupId: string) => void;
@@ -1047,14 +1052,19 @@ function sessionContextItems(
   s: Session,
   cbs: {
     setRenaming: (k: string) => void;
-    onOpenSession: (s: Session) => void;
-    onOpenInCurrentTab?: (s: Session) => void;
+    onOpenSession: (s: Session, keepAlive?: boolean) => void;
+    onOpenInCurrentTab?: (s: Session, keepAlive?: boolean) => void;
     onDuplicateSession?: (s: Session) => void;
     onEditSession?: (s: Session) => void;
     onDeleteSession: (id: string) => void;
     onNotice?: (msg: string, tone?: 'info' | 'success' | 'warn' | 'error') => void;
   },
 ): ContextMenuItem[] {
+  // Keep-alive override: per-launch opposite of the session's saved default,
+  // so the user can open a durable or one-off shell without editing the
+  // session. Only SSH / EC2 sessions can be tmux-backed.
+  const canKeepAlive = s.type === 'ssh' || s.type === 'awsec2';
+  const keepAlive = !s.persist; // the mode this override opens in
   return [
     { kind: 'item', label: 'Open in new tab', icon: glyphDuplicate, onClick: () => cbs.onOpenSession(s) },
     {
@@ -1063,6 +1073,16 @@ function sessionContextItems(
       icon: glyphSplit,
       onClick: () => (cbs.onOpenInCurrentTab || cbs.onOpenSession)(s),
     },
+    ...(canKeepAlive
+      ? ([
+          {
+            kind: 'item',
+            label: keepAlive ? 'Open keep-alive in new tab' : 'Open w/o keep-alive in new tab',
+            icon: glyphDuplicate,
+            onClick: () => cbs.onOpenSession(s, keepAlive),
+          },
+        ] as ContextMenuItem[])
+      : []),
     { kind: 'separator' },
     {
       kind: 'item',

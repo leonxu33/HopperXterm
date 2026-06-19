@@ -212,7 +212,16 @@ func (a *App) ReorderGroup(id, beforeGroupID string) error {
 // output stream over Wails events (pane:state:{paneId},
 // pane:output:{paneId}, connection:log:{paneId}).
 func (a *App) OpenPane(paneID, sessionID string) error {
-	return a.openPaneIn(paneID, sessionID, "", "", false)
+	return a.openPaneIn(paneID, sessionID, "", "", false, nil)
+}
+
+// OpenPaneKeepAlive is OpenPane with an explicit per-launch keep-alive choice
+// that overrides the session's saved Persist default for this open only — the
+// saved session record is left untouched. Wired to the sidebar's
+// "Open keep-alive…" / "Open w/o keep-alive…" context-menu actions so the user
+// can launch a session either way without first editing it.
+func (a *App) OpenPaneKeepAlive(paneID, sessionID string, keepAlive bool) error {
+	return a.openPaneIn(paneID, sessionID, "", "", false, &keepAlive)
 }
 
 // OpenPaneInDir is OpenPane for workspace restore: it reopens each pane in its
@@ -222,16 +231,22 @@ func (a *App) OpenPane(paneID, sessionID string) error {
 // new token, so a pane comes back exactly as it was saved (the "keep session
 // alive" toggle only governs future opens, not restored panes).
 func (a *App) OpenPaneInDir(paneID, sessionID, dir, tmuxID string) error {
-	return a.openPaneIn(paneID, sessionID, dir, tmuxID, true)
+	return a.openPaneIn(paneID, sessionID, dir, tmuxID, true, nil)
 }
 
-func (a *App) openPaneIn(paneID, sessionID, dir, tmuxID string, restore bool) error {
+// openPaneIn resolves the session and opens a pane against it. persistOverride,
+// when non-nil, replaces the session's saved Persist on the local copy for this
+// open only (used by OpenPaneKeepAlive); nil keeps the saved default.
+func (a *App) openPaneIn(paneID, sessionID, dir, tmuxID string, restore bool, persistOverride *bool) error {
 	if paneID == "" || sessionID == "" {
 		return fmt.Errorf("OpenPane: paneId and sessionId required")
 	}
 	sess, ok := a.profile.Lookup(sessionID)
 	if !ok {
 		return fmt.Errorf("OpenPane: session %s not found", sessionID)
+	}
+	if persistOverride != nil {
+		sess.Persist = *persistOverride
 	}
 	return a.panes.OpenInDir(paneID, sess, dir, tmuxID, restore)
 }
@@ -287,7 +302,7 @@ func (a *App) ReconnectPane(paneID string) error {
 	_ = a.panes.Close(paneID)
 	// restore=true: never mint a new token — preserve tmuxID so a persistent
 	// pane re-attaches its existing session and a plain pane stays plain.
-	return a.openPaneIn(paneID, sessionID, "", tmuxID, true)
+	return a.openPaneIn(paneID, sessionID, "", tmuxID, true, nil)
 }
 
 // SendInput forwards a keystroke (or paste) to the pane's remote PTY.

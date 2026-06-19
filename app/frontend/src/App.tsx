@@ -25,6 +25,7 @@ import {
   MoveSession,
   ReorderGroup,
   OpenPane,
+  OpenPaneKeepAlive,
   OpenPaneInDir,
   ClosePane,
   ClosePaneKill,
@@ -743,7 +744,10 @@ function App() {
   };
 
   // ─── Tab + Pane lifecycle ────────────────────────────────────────────
-  const openSession = async (s: Session) => {
+  // keepAlive overrides the session's saved Persist for this launch only
+  // (sidebar "Open keep-alive…" / "Open w/o keep-alive…"); undefined uses the
+  // saved default.
+  const openSession = async (s: Session, keepAlive?: boolean) => {
     const paneId = newId('pane');
     const tab: Tab = {
       id: newId('tab'),
@@ -763,20 +767,20 @@ function App() {
     setSelectedSessionId(null);
     pushRecent({ kind: 'session', id: s.id });
     try {
-      await OpenPane(paneId, s.id);
+      await (keepAlive === undefined ? OpenPane(paneId, s.id) : OpenPaneKeepAlive(paneId, s.id, keepAlive));
     } catch (e) {
       setErr(`OpenPane failed: ${String(e)}`);
       setPaneStates((cur) => ({ ...cur, [paneId]: 'Disconnected' }));
     }
   };
 
-  const openInCurrentTab = async (s: Session) => {
-    if (!activeTabId) return openSession(s);
+  const openInCurrentTab = async (s: Session, keepAlive?: boolean) => {
+    if (!activeTabId) return openSession(s, keepAlive);
     const tab = tabs.find((t) => t.id === activeTabId);
-    if (!tab) return openSession(s);
+    if (!tab) return openSession(s, keepAlive);
     // Don't add a pane into a temporary tab — open the session in its own tab.
     if (tempTabIds.has(tab.id)) {
-      return openSession(s);
+      return openSession(s, keepAlive);
     }
     if (paneCount(tab.layout) >= PANE_LIMIT) {
       setErr(`Max ${PANE_LIMIT} panes per tab.`);
@@ -789,7 +793,9 @@ function App() {
     setSelectedSessionId(null);
     pushRecent({ kind: 'session', id: s.id });
     try {
-      await OpenPane(newPaneId, s.id);
+      await (keepAlive === undefined
+        ? OpenPane(newPaneId, s.id)
+        : OpenPaneKeepAlive(newPaneId, s.id, keepAlive));
     } catch (e) {
       setErr(`OpenPane failed: ${String(e)}`);
     }
