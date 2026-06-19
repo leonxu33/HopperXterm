@@ -379,13 +379,20 @@ func (a *App) GetPaneHostInfo(paneID string) (events.HostInfo, error) {
 	return a.panes.HostInfo(paneID)
 }
 
-// InstallOsc7Hook writes a bash/zsh-aware OSC 7 emitter into the
-// pane's PTY so future prompt redraws emit OSC 7. Called by the SFTP
-// panel's "Follow terminal folder" toggle on activation so the
-// feature works even on shells whose default config doesn't emit
-// OSC 7 (minimal bash, alpine, busybox sh).
-func (a *App) InstallOsc7Hook(paneID string) error {
-	return a.panes.InstallOsc7Hook(paneID)
+// EnableCwdFollow turns on "Follow terminal folder" cwd tracking for the
+// pane. Called by the SFTP panel's toggle on activation. Plain shells get a
+// bash/zsh OSC 7 emitter injected into the PTY (so tracking works even on
+// shells whose default config doesn't emit OSC 7 — minimal bash, alpine,
+// busybox sh); tmux-backed panes instead poll tmux's #{pane_current_path}
+// over a side channel, since injecting into tmux corrupts its screen.
+func (a *App) EnableCwdFollow(paneID string) error {
+	return a.panes.EnableCwdFollow(paneID)
+}
+
+// DisableCwdFollow stops cwd tracking started by EnableCwdFollow (tears down
+// the tmux poller; the OSC 7 hook on a plain shell is left in place).
+func (a *App) DisableCwdFollow(paneID string) error {
+	return a.panes.DisableCwdFollow(paneID)
 }
 
 // SftpMkdir creates a directory on the remote. parents=true acts like mkdir -p.

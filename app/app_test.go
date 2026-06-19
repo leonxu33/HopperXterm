@@ -193,8 +193,11 @@ func TestSftpAndResourcePassthrough_UnknownPane(t *testing.T) {
 	if _, err := a.GetPaneOSFamily("ghost"); err == nil {
 		t.Error("GetPaneOSFamily")
 	}
-	if err := a.InstallOsc7Hook("ghost"); err == nil {
-		t.Error("InstallOsc7Hook")
+	if err := a.EnableCwdFollow("ghost"); err == nil {
+		t.Error("EnableCwdFollow")
+	}
+	if err := a.DisableCwdFollow("ghost"); err == nil {
+		t.Error("DisableCwdFollow")
 	}
 	if err := a.SftpMkdir("ghost", "/x", false); err == nil {
 		t.Error("SftpMkdir")

@@ -263,14 +263,24 @@ func (m *Manager) HostInfo(paneID string) (events.HostInfo, error) {
 	return p.cachedHostInfo(), nil
 }
 
-// InstallOsc7Hook injects an OSC 7 emitter into the pane's shell so
-// future prompt redraws emit a cwd that the readLoop can detect.
-func (m *Manager) InstallOsc7Hook(paneID string) error {
+// EnableCwdFollow turns on "Follow terminal folder" cwd tracking for the pane,
+// routing to the tmux pane_current_path poller or the OSC 7 shell hook.
+func (m *Manager) EnableCwdFollow(paneID string) error {
 	p, ok := m.get(paneID)
 	if !ok {
 		return errors.New("pane: not found")
 	}
-	return p.InstallOsc7Hook()
+	return p.EnableCwdFollow()
+}
+
+// DisableCwdFollow stops cwd tracking started by EnableCwdFollow.
+func (m *Manager) DisableCwdFollow(paneID string) error {
+	p, ok := m.get(paneID)
+	if !ok {
+		return errors.New("pane: not found")
+	}
+	p.DisableCwdFollow()
+	return nil
 }
 
 // SftpMkdir creates a directory.

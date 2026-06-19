@@ -12,9 +12,10 @@ import {
   FileEditOpen,
   FileEditStop,
   FileOpenWith,
+  DisableCwdFollow,
+  EnableCwdFollow,
   GetPaneCwd,
   GetPaneOSFamily,
-  InstallOsc7Hook,
   PickDirectory,
   PickFiles,
   SftpCreate,
@@ -223,10 +224,20 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
       setLoading(true);
       setErr(null);
       try {
-        // Restore the folder this pane was last on; fall back to the remote
-        // home on first visit (or if the cached path is gone, loadDir surfaces
-        // the error and the user can navigate up).
-        const target = paneCwdCache.get(paneId) ?? (await SftpCwd(paneId));
+        // If this pane is following the terminal, land on the shell's CURRENT
+        // cwd, not the panel's last-viewed folder — the poller / OSC 7 hook
+        // keeps it fresh even while the panel is closed, so a remount catches
+        // up to any cd's made in the meantime instead of waiting for the next.
+        let target = '';
+        if (paneFollowCache.get(paneId)) {
+          target = await GetPaneCwd(paneId).catch(() => '');
+        }
+        // Otherwise restore the folder this pane was last on; fall back to the
+        // remote home on first visit (or if the cached path is gone, loadDir
+        // surfaces the error and the user can navigate up).
+        if (!target) {
+          target = paneCwdCache.get(paneId) ?? (await SftpCwd(paneId));
+        }
         if (cancelled) return;
         await loadDir(target);
       } catch (e) {
@@ -428,7 +439,8 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
     if (!paneId) return;
     // Restore this pane's own follow choice (per-pane, not shared across
     // panes of the same session).
-    setFollowTerm(paneFollowCache.get(paneId) ?? false);
+    const follow = paneFollowCache.get(paneId) ?? false;
+    setFollowTerm(follow);
     setFollowSupported(true); // optimistic until proven Windows
     void GetPaneOSFamily(paneId)
       .then((fam) => setFollowSupported(fam !== 'windows'))
@@ -438,6 +450,18 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
     });
     return () => off();
   }, [paneId]);
+
+  // Re-arm cwd tracking whenever a following pane (re)connects while we're
+  // mounted. The tmux poller dies with its SSH session on a drop, and reconnect
+  // doesn't re-run connect-init for persistent panes, so without this a tmux
+  // pane silently stops following after a reconnect; it also covers a
+  // restored-workspace pane that mounts before it finishes connecting. Keyed on
+  // paneState so it fires on each Connected transition. EnableCwdFollow is
+  // idempotent, so re-arming a still-live poller / installed hook is a no-op.
+  useEffect(() => {
+    if (!paneId || paneState !== 'Connected') return;
+    if (paneFollowCache.get(paneId)) void EnableCwdFollow(paneId).catch(() => {});
+  }, [paneId, paneState]);
 
   const goBack = () => {
     if (cursorRef.current <= 0) return;
@@ -1365,21 +1389,24 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
         onChange={(next) => {
           setFollowTerm(next);
           if (paneId) paneFollowCache.set(paneId, next);
-          if (!(next && paneId && paneState === 'Connected')) return;
+          if (!paneId) return;
+          if (!next) {
+            // Stop following — tears down the tmux poller (no-op for a plain
+            // shell, whose OSC 7 hook is harmless and left in place).
+            void DisableCwdFollow(paneId).catch(() => {});
+            return;
+          }
+          if (paneState !== 'Connected') return;
+          // Enable tracking. The backend routes this: a tmux-backed pane starts
+          // a #{pane_current_path} poller; a plain shell injects the OSC 7 hook
+          // once (idempotent, so no re-inject into a foregrounded app). Both
+          // push pane:cwd events that the subscription above acts on.
+          void EnableCwdFollow(paneId).catch(() => {});
+          // Jump immediately if we already know the cwd (plain shells populate
+          // it at connect; the tmux poller emits its first tick within ~1 s).
           void GetPaneCwd(paneId)
             .then((p) => {
-              if (p) {
-                // The hook is already active (auto-installed at connect, or
-                // a prior toggle) and the shell is emitting OSC 7 — just
-                // jump to the current dir. Do NOT re-inject: that would type
-                // the hook command into whatever holds the prompt,
-                // corrupting a foregrounded full-screen app (vim, a REPL, …).
-                if (p !== cwd) void loadDir(p);
-                return;
-              }
-              // Nothing tracked yet — install the hook so future prompt
-              // redraws emit a cwd. (Backend no-ops this on Windows.)
-              void InstallOsc7Hook(paneId).catch(() => {});
+              if (p && p !== cwdRef.current) void loadDir(p);
             })
             .catch(() => {});
         }}

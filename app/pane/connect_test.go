@@ -72,8 +72,11 @@ func TestManager_NotFoundBranches(t *testing.T) {
 	if _, err := m.LastCwd("ghost"); err == nil {
 		t.Error("LastCwd on unknown pane")
 	}
-	if err := m.InstallOsc7Hook("ghost"); err == nil {
-		t.Error("InstallOsc7Hook on unknown pane")
+	if err := m.EnableCwdFollow("ghost"); err == nil {
+		t.Error("EnableCwdFollow on unknown pane")
+	}
+	if err := m.DisableCwdFollow("ghost"); err == nil {
+		t.Error("DisableCwdFollow on unknown pane")
 	}
 	if err := m.SftpMkdir("ghost", "/x", false); err == nil {
 		t.Error("SftpMkdir on unknown pane")
@@ -181,9 +184,10 @@ func TestManager_OpenSSH_FullPath(t *testing.T) {
 	_ = m.StopResourceMonitor("pane-ssh") // still one consumer left
 	_ = m.StopResourceMonitor("pane-ssh") // now zero → poller stops
 
-	// InstallOsc7Hook writes into the (echoing) shell.
-	if err := m.InstallOsc7Hook("pane-ssh"); err != nil {
-		t.Errorf("InstallOsc7Hook: %v", err)
+	// EnableCwdFollow on a plain (non-tmux) SSH pane installs the OSC 7 hook,
+	// writing into the (echoing) shell.
+	if err := m.EnableCwdFollow("pane-ssh"); err != nil {
+		t.Errorf("EnableCwdFollow: %v", err)
 	}
 
 	if err := m.Close("pane-ssh"); err != nil {

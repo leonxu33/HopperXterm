@@ -191,17 +191,34 @@ type Pane struct {
 	cwdMu   sync.RWMutex
 	lastCwd string
 
-	// Output filter used by InstallOsc7Hook to swallow the echo of
+	// cwd-follow poller for tmux-backed panes. tmux owns its own screen, so
+	// the OSC 7 inject can't be used inside it (swallowing the echo desyncs
+	// the client). Instead, while "Follow terminal folder" is on, a dedicated
+	// exec channel polls tmux's #{pane_current_path} (which tmux derives from
+	// the pane process's real cwd) once per second and emits pane:cwd on
+	// change. cwdFollowCancel stops it; nil when not following. cwdFollowGen
+	// tags each poller launch so a superseded poller's self-cleanup can't
+	// clear a newer one's cancel.
+	cwdFollowMu     sync.Mutex
+	cwdFollowCancel context.CancelFunc
+	cwdFollowGen    int
+
+	// Output filter used by installOsc7Hook to swallow the echo of
 	// the OSC 7 inject command so it never reaches the user's
 	// terminal. swallowPending accumulates incoming PTY bytes; when
 	// swallowMarker is found, everything up to and including it is
 	// dropped and forwarding resumes. Deadline guards against the
 	// marker never arriving (e.g., the shell errored out).
+	//
+	// osc7Installed records that the OSC 7 hook has been injected (at connect
+	// time or by EnableCwdFollow) so a repeat enable doesn't re-inject — which
+	// would type the hook command into a possibly-foregrounded full-screen app.
 	swallowMu       sync.Mutex
 	swallowActive   bool
 	swallowPending  []byte
 	swallowMarker   []byte
 	swallowDeadline time.Time
+	osc7Installed   bool
 }
 
 type authResult struct {
@@ -304,10 +321,10 @@ func (p *Pane) connectSSHLike(sess profile.Session) error {
 	go p.probeHostInfo(client)
 	p.maybeAskSavePassword(sess)
 	if runInit {
-		// OSC 7 cwd tracking only for a plain shell — tmux doesn't forward the
-		// inner shell's OSC 7 to our terminal, and a persistent session
-		// preserves its own cwd across re-attach, so the hook is both
-		// ineffective and unnecessary inside tmux.
+		// Auto-install OSC 7 cwd tracking only for a plain shell. tmux-backed
+		// panes never inject (the swallow trick desyncs tmux's screen); they
+		// follow the cwd via a side-channel pane_current_path poller that the
+		// "Follow terminal folder" toggle starts on demand — see startCwdFollow.
 		p.runConnectInit(sess, launch == "")
 	}
 	return nil
@@ -771,9 +788,10 @@ func (p *Pane) ResolveHostKeyChange(accept bool) error {
 // corrupt a half-typed command, which is why this can't be done lazily at
 // save time.
 //
-// doOsc7 gates step 1: callers pass false for tmux-backed persistent sessions,
-// where the inner shell's OSC 7 isn't forwarded to our terminal (so the hook
-// can't work) and the session preserves its own cwd across re-attach anyway.
+// doOsc7 gates step 1: callers pass false for tmux-backed persistent sessions.
+// The OSC 7 inject can't be used inside tmux (its echo-swallowing desyncs
+// tmux's screen), so those panes track the cwd through a side-channel
+// pane_current_path poller instead — see startCwdFollow.
 func (p *Pane) runConnectInit(sess profile.Session, doOsc7 bool) {
 	go func() {
 		select {
@@ -1093,7 +1111,7 @@ func (p *Pane) cacheHostInfo(hi events.HostInfo) {
 	p.hostInfo = hi
 }
 
-// InstallOsc7Hook writes a shell snippet into the PTY that:
+// installOsc7Hook writes a shell snippet into the PTY that:
 //
 //  1. Defines _hop_osc7, a function that prints an OSC 7 escape for
 //     the current $PWD.
@@ -1103,22 +1121,22 @@ func (p *Pane) cacheHostInfo(hi events.HostInfo) {
 //  3. Calls the function once immediately so the panel can sync
 //     without waiting for the user to press Enter.
 //  4. Prints a private OSC sequence ("\e]7339;hop:done\a") as an
-//     end-of-inject marker. The readLoop uses it to know when to
-//     stop swallowing PTY output, so the inject command's echo
-//     never reaches the user's terminal.
+//     end-of-inject marker. The readLoop uses it to know when to stop
+//     swallowing PTY output, so the inject command's echo never reaches
+//     the user's terminal.
 //
-// Used by the "Follow terminal folder" toggle. Non-bash/non-zsh
-// shells (cmd.exe, PowerShell, fish, busybox sh on minimal images)
-// will silently fail the conditional branches — the one-shot printf
-// still works on most POSIX shells; if no marker arrives within 3 s
-// the suppression filter releases its buffer anyway.
-func (p *Pane) InstallOsc7Hook() error {
-	return p.installOsc7Hook("Follow terminal folder")
-}
-
-// installOsc7Hook is the implementation; reason is recorded in the
-// connection-log audit line so each caller's context is clear (the
-// "Follow terminal folder" toggle vs. automatic connect-time cwd tracking).
+// Plain-shell only — tmux-backed panes never inject (the swallow trick
+// desyncs tmux's screen); they follow the cwd via startCwdFollow. The two
+// cwd-follow paths are routed by EnableCwdFollow.
+//
+// Non-bash/non-zsh shells (cmd.exe, PowerShell, fish, busybox sh on minimal
+// images) will silently fail the conditional branches — the one-shot printf
+// still works on most POSIX shells; if no marker arrives within 3 s the
+// suppression filter releases its buffer anyway.
+//
+// reason is recorded in the connection-log audit line so each caller's context
+// is clear (the "Follow terminal folder" toggle vs. automatic connect-time
+// cwd tracking).
 func (p *Pane) installOsc7Hook(reason string) error {
 	pty := p.currentPTY()
 	if pty == nil || pty.Stdin() == nil {
@@ -1143,6 +1161,9 @@ func (p *Pane) installOsc7Hook(reason string) error {
 	p.swallowMu.Unlock()
 	_, err := pty.Stdin().Write([]byte(osc7Hook))
 	if err == nil {
+		p.swallowMu.Lock()
+		p.osc7Installed = true
+		p.swallowMu.Unlock()
 		// Audit trail: the inject is silently filtered out of the
 		// user's terminal, so leave a one-line trace in the
 		// connection log identifying what we did and why.
@@ -1163,6 +1184,11 @@ func (p *Pane) installOsc7Hook(reason string) error {
 // post-command prompt would render on the same line as the stale one
 // (a visible "prompt$ prompt$" doubling). Erasing the line lets the
 // redrawn prompt land cleanly, so the inject leaves no visible trace.
+//
+// This is NOT used inside tmux: tmux maintains its own screen model, so
+// swallowing the inject's echo desyncs the client (a blank gap, leaked
+// command text on the next redraw). tmux-backed panes follow the cwd
+// via a side channel instead — see startCwdFollow / pane_current_path.
 const osc7Hook = ` _hop_osc7(){ printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-${HOST:-$(hostname 2>/dev/null)}}" "$PWD"; }; if [ -n "$BASH_VERSION" ]; then case ";${PROMPT_COMMAND};" in *";_hop_osc7;"*|*";_hop_osc7"*) :;; *) PROMPT_COMMAND="_hop_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND}";; esac; elif [ -n "$ZSH_VERSION" ]; then case " ${precmd_functions[*]} " in *" _hop_osc7 "*) :;; *) precmd_functions+=(_hop_osc7);; esac; fi; _hop_osc7; printf '\033]7339;hop:done\007\r\033[2K'
 `
 
@@ -1228,6 +1254,7 @@ func (p *Pane) Close() {
 	p.cancel()
 	p.stopResourceMonitor()
 	p.stopAllProcessMonitors()
+	p.stopCwdFollow()
 	p.teardownShell()
 	p.transition(StateDisconnected, "closed by user")
 }

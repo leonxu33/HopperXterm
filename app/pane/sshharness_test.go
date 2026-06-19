@@ -52,6 +52,16 @@ type paneSSHServer struct {
 	tmuxAttached  map[string]ssh.Channel // session name → its live attach channel
 	execLog       []string
 	shellReqs     int
+	// tmuxCwd is the value a `tmux display-message … #{pane_current_path}`
+	// poll streams back, mimicking the pane's working directory. Settable so a
+	// cwd-follow test can change it and watch the poller propagate the update.
+	tmuxCwd string
+}
+
+func (s *paneSSHServer) setTmuxCwd(path string) {
+	s.stateMu.Lock()
+	s.tmuxCwd = path
+	s.stateMu.Unlock()
 }
 
 func (s *paneSSHServer) setTmux(installed bool) {
@@ -433,6 +443,21 @@ func (s *paneSSHServer) runExec(ch ssh.Channel, cmd string) {
 		var b [4]byte
 		_, _ = ch.SendRequest("exit-status", false, b[:])
 		return
+	}
+	// `tmux display-message … #{pane_current_path}` (the cwd-follow poller):
+	// stream the current tmuxCwd once per "tick" so the pane's reader can emit
+	// pane:cwd and update lastCwd. Re-reads the value each loop so a test that
+	// changes it mid-stream sees the new path propagate.
+	if strings.Contains(cmd, "pane_current_path") {
+		for {
+			s.stateMu.Lock()
+			cwd := s.tmuxCwd
+			s.stateMu.Unlock()
+			if _, err := io.WriteString(ch, cwd+"\n"); err != nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 	line := "v3 1700000000000 12 4000000 8000000 1.5 2.5 10.0 5.0 3600 0.42 " +
 		"5000000 20000000 100000 50000 - - -\n"

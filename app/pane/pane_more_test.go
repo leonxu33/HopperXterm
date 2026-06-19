@@ -148,8 +148,8 @@ func TestCwdHookApplies(t *testing.T) {
 
 func TestInstallOsc7Hook(t *testing.T) {
 	p, f := paneWithPTY("")
-	if err := p.InstallOsc7Hook(); err != nil {
-		t.Fatalf("InstallOsc7Hook: %v", err)
+	if err := p.installOsc7Hook("test"); err != nil {
+		t.Fatalf("installOsc7Hook: %v", err)
 	}
 	if !strings.Contains(f.written(), "_hop_osc7") {
 		t.Errorf("hook not written to stdin: %q", f.written())
@@ -158,21 +158,21 @@ func TestInstallOsc7Hook(t *testing.T) {
 	active := p.swallowActive
 	p.swallowMu.Unlock()
 	if !active {
-		t.Error("swallow filter not armed after InstallOsc7Hook")
+		t.Error("swallow filter not armed after installOsc7Hook")
 	}
 
 	// Not connected → error.
 	p2 := newPane(context.Background(), "x", profile.Session{})
-	if err := p2.InstallOsc7Hook(); err == nil {
-		t.Error("InstallOsc7Hook without a pty should error")
+	if err := p2.installOsc7Hook("test"); err == nil {
+		t.Error("installOsc7Hook without a pty should error")
 	}
 
 	// Windows remote → refused (the hook is bash/zsh; injecting it into
 	// cmd/PowerShell would print garbage), and nothing is written.
 	pWin, fWin := paneWithPTY("")
 	pWin.cacheOSFamily("windows")
-	if err := pWin.InstallOsc7Hook(); err == nil {
-		t.Error("InstallOsc7Hook should refuse a Windows shell")
+	if err := pWin.installOsc7Hook("test"); err == nil {
+		t.Error("installOsc7Hook should refuse a Windows shell")
 	}
 	if fWin.written() != "" {
 		t.Errorf("nothing should be written to a Windows shell, got %q", fWin.written())
