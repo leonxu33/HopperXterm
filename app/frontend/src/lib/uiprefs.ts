@@ -23,6 +23,15 @@ export const PREF_NET_SPEED_UNIT = 'netSpeedUnit';
 /** Resource-monitor disk I/O unit: 'bytes' (B/s, default) or 'bps' (bits). */
 export const PREF_DISK_SPEED_UNIT = 'diskSpeedUnit';
 
+// Resource-monitor chart visibility toggles. Each defaults to shown (true);
+// the right-click menu on the system / process monitor flips them.
+export const PREF_MON_SHOW_CPU = 'monShowCpu';
+export const PREF_MON_SHOW_MEM = 'monShowMem';
+export const PREF_MON_SHOW_DISK = 'monShowDisk';
+export const PREF_MON_SHOW_NET = 'monShowNet';
+export const PREF_MON_SHOW_PROC_CPU = 'monShowProcCpu';
+export const PREF_MON_SHOW_PROC_MEM = 'monShowProcMem';
+
 /** ID of the workspace that was active on last shutdown — restored on launch. */
 export const PREF_ACTIVE_WORKSPACE = 'activeWorkspace';
 

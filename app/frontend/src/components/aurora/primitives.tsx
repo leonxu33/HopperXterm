@@ -181,7 +181,7 @@ export function Resizer({ onMouseDown }: { onMouseDown: (e: ReactMouseEvent) => 
 // Glass blur context menu anchored at (x, y). Auto-closes on outside click /
 // Esc. Mirrors the menu used by sidebar / tab bar in the design.
 export type ContextMenuItem =
-  | { kind: 'item'; label: string; icon?: ReactNode; danger?: boolean; onClick: () => void; disabled?: boolean; shortcut?: string }
+  | { kind: 'item'; label: string; icon?: ReactNode; danger?: boolean; onClick: () => void; disabled?: boolean; shortcut?: string; keepOpen?: boolean }
   | { kind: 'submenu'; label: string; icon?: ReactNode; disabled?: boolean; items: ContextMenuItem[] }
   | { kind: 'separator' };
 
@@ -236,7 +236,9 @@ function MenuRow({
           return;
         }
         it.onClick();
-        onSelect();
+        // `keepOpen` items (e.g. multi-toggle checkboxes) leave the menu up so
+        // the user can flip several in a row; everything else closes the chain.
+        if (!it.keepOpen) onSelect();
       }}
       style={{
         width: '100%',

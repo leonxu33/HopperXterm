@@ -21,7 +21,19 @@ import { log } from '../../lib/log';
 import { ContextMenu } from './primitives';
 import type { ContextMenuItem } from './primitives';
 import { formatKB, formatRate } from '../../lib/format';
-import { useStringPref, setPref, PREF_NET_SPEED_UNIT, PREF_DISK_SPEED_UNIT } from '../../lib/uiprefs';
+import {
+  useStringPref,
+  useBoolPref,
+  setPref,
+  PREF_NET_SPEED_UNIT,
+  PREF_DISK_SPEED_UNIT,
+  PREF_MON_SHOW_CPU,
+  PREF_MON_SHOW_MEM,
+  PREF_MON_SHOW_DISK,
+  PREF_MON_SHOW_NET,
+  PREF_MON_SHOW_PROC_CPU,
+  PREF_MON_SHOW_PROC_MEM,
+} from '../../lib/uiprefs';
 import { ProcessPicker } from '../modals/ProcessPicker';
 import type { ProcTarget } from '../modals/ProcessPicker';
 
@@ -546,6 +558,14 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
   // Rate units (persisted). Network defaults to bits, disk to bytes.
   const netUnit = useStringPref(PREF_NET_SPEED_UNIT, 'bps');
   const diskUnit = useStringPref(PREF_DISK_SPEED_UNIT, 'bytes');
+  // Per-chart visibility (persisted), toggled from the right-click menus.
+  // Each defaults to shown.
+  const showCpu = useBoolPref(PREF_MON_SHOW_CPU, true);
+  const showMem = useBoolPref(PREF_MON_SHOW_MEM, true);
+  const showDisk = useBoolPref(PREF_MON_SHOW_DISK, true);
+  const showNet = useBoolPref(PREF_MON_SHOW_NET, true);
+  const showProcCpu = useBoolPref(PREF_MON_SHOW_PROC_CPU, true);
+  const showProcMem = useBoolPref(PREF_MON_SHOW_PROC_MEM, true);
   const onResetBuffer = () => {
     resetResourceBuffer(hostKey);
   };
@@ -628,6 +648,26 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
   const notConnected = !noSession && paneState && paneState !== 'Connected';
   const connected = !noSession && !notConnected;
 
+  // A checkmark for "shown", a matching-width blank for "hidden", so labels
+  // line up whether or not the chart is visible.
+  const checkIcon = (active: boolean) =>
+    active ? (
+      <svg width={13} height={13} viewBox="0 0 16 16" fill="none">
+        <path d="M3.5 8.5 L6.5 11.5 L12.5 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ) : (
+      <span style={{ width: 13, height: 13, display: 'block' }} />
+    );
+  // Build a chart-visibility toggle row: checked when shown, flips the pref.
+  // keepOpen lets the user toggle several charts without the menu closing.
+  const chartToggle = (label: string, prefKey: string, shown: boolean): ContextMenuItem => ({
+    kind: 'item',
+    label,
+    icon: checkIcon(shown),
+    onClick: () => setPref(prefKey, !shown),
+    keepOpen: true,
+  });
+
   const sampleCount = samples.length;
   const sysItems: ContextMenuItem[] = [
     {
@@ -641,6 +681,17 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
       label: `Export to CSV${sampleCount > 0 ? ` (${sampleCount})` : ''}`,
       onClick: () => void onExportCsv(),
       disabled: sampleCount === 0,
+    },
+    { kind: 'separator' },
+    {
+      kind: 'submenu',
+      label: 'Charts',
+      items: [
+        chartToggle('CPU', PREF_MON_SHOW_CPU, showCpu),
+        chartToggle('Memory', PREF_MON_SHOW_MEM, showMem),
+        chartToggle('Disk I/O', PREF_MON_SHOW_DISK, showDisk),
+        chartToggle('Network', PREF_MON_SHOW_NET, showNet),
+      ],
     },
   ];
 
@@ -657,18 +708,20 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
           onClick: () => void onExportProcCsv(),
           disabled: procSampleCount === 0,
         },
+        { kind: 'separator' },
+        {
+          kind: 'submenu',
+          label: 'Charts',
+          items: [
+            chartToggle('Process CPU', PREF_MON_SHOW_PROC_CPU, showProcCpu),
+            chartToggle('Process Memory', PREF_MON_SHOW_PROC_MEM, showProcMem),
+          ],
+        },
       ]
     : [{ kind: 'item', label: 'Monitor a process…', onClick: () => setPickerOpen(true) }];
 
   // Active unit gets a check; the other a matching-width blank so labels align.
-  const unitCheck = (active: boolean) =>
-    active ? (
-      <svg width={13} height={13} viewBox="0 0 16 16" fill="none">
-        <path d="M3.5 8.5 L6.5 11.5 L12.5 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    ) : (
-      <span style={{ width: 13, height: 13, display: 'block' }} />
-    );
+  const unitCheck = checkIcon;
   const rateItems: ContextMenuItem[] = rateMenu
     ? [
         {
@@ -733,49 +786,57 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
               </div>
             )}
 
-            <Card
-              label="CPU"
-              value={latest ? `${Math.round(latest.cpuPct)}%` : '—'}
-              data={series.cpu}
-              color={TOKENS.accent}
-              max={100}
-              slots={points}
-              format={(v) => `${Math.round(v)}%`}
-            />
-            <Card
-              label="Memory"
-              value={
-                latest && totalMemGB !== null && memUsedGB !== null
-                  ? `${memUsedGB.toFixed(2)} / ${totalMemGB.toFixed(2)} GB`
-                  : '—'
-              }
-              data={series.mem}
-              color={TOKENS.info}
-              max={100}
-              slots={points}
-              legend={totalMemGB ? `of ${totalMemGB.toFixed(2)} GB` : null}
-              format={(v) => `${v.toFixed(1)}%`}
-            />
-            <Pair
-              label="Disk I/O"
-              slots={points}
-              onValueContext={onRateContext(PREF_DISK_SPEED_UNIT, diskUnit)}
-              format={(v) => formatRate(v, diskUnit)}
-              series={[
-                { name: 'read', value: latest ? formatRate(latest.diskRdKBs, diskUnit) : '—', data: series.diskRd, color: COLOR_READ },
-                { name: 'write', value: latest ? formatRate(latest.diskWrKBs, diskUnit) : '—', data: series.diskWr, color: COLOR_WRITE },
-              ]}
-            />
-            <Pair
-              label="Network"
-              slots={points}
-              onValueContext={onRateContext(PREF_NET_SPEED_UNIT, netUnit)}
-              format={(v) => formatRate(v, netUnit)}
-              series={[
-                { name: 'down', value: latest ? formatRate(latest.netRxKBs, netUnit) : '—', data: series.netRx, color: COLOR_DOWN },
-                { name: 'up', value: latest ? formatRate(latest.netTxKBs, netUnit) : '—', data: series.netTx, color: COLOR_UP },
-              ]}
-            />
+            {showCpu && (
+              <Card
+                label="CPU"
+                value={latest ? `${Math.round(latest.cpuPct)}%` : '—'}
+                data={series.cpu}
+                color={TOKENS.accent}
+                max={100}
+                slots={points}
+                format={(v) => `${Math.round(v)}%`}
+              />
+            )}
+            {showMem && (
+              <Card
+                label="Memory"
+                value={
+                  latest && totalMemGB !== null && memUsedGB !== null
+                    ? `${memUsedGB.toFixed(2)} / ${totalMemGB.toFixed(2)} GB`
+                    : '—'
+                }
+                data={series.mem}
+                color={TOKENS.info}
+                max={100}
+                slots={points}
+                legend={totalMemGB ? `of ${totalMemGB.toFixed(2)} GB` : null}
+                format={(v) => `${v.toFixed(1)}%`}
+              />
+            )}
+            {showDisk && (
+              <Pair
+                label="Disk I/O"
+                slots={points}
+                onValueContext={onRateContext(PREF_DISK_SPEED_UNIT, diskUnit)}
+                format={(v) => formatRate(v, diskUnit)}
+                series={[
+                  { name: 'read', value: latest ? formatRate(latest.diskRdKBs, diskUnit) : '—', data: series.diskRd, color: COLOR_READ },
+                  { name: 'write', value: latest ? formatRate(latest.diskWrKBs, diskUnit) : '—', data: series.diskWr, color: COLOR_WRITE },
+                ]}
+              />
+            )}
+            {showNet && (
+              <Pair
+                label="Network"
+                slots={points}
+                onValueContext={onRateContext(PREF_NET_SPEED_UNIT, netUnit)}
+                format={(v) => formatRate(v, netUnit)}
+                series={[
+                  { name: 'down', value: latest ? formatRate(latest.netRxKBs, netUnit) : '—', data: series.netRx, color: COLOR_DOWN },
+                  { name: 'up', value: latest ? formatRate(latest.netTxKBs, netUnit) : '—', data: series.netTx, color: COLOR_UP },
+                ]}
+              />
+            )}
 
             {latest && (
               <div style={footRow}>
@@ -850,29 +911,33 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
                     : 'Process monitor stalled — no recent samples.'}
                 </div>
               )}
-              <Card
-                label="Process CPU"
-                value={procLatest ? `${Math.round(procLatest.cpuPct)}%` : '—'}
-                data={procSeries.cpu}
-                color={COLOR_UP}
-                max={procCpuMax}
-                slots={points}
-                format={(v) => `${Math.round(v)}%`}
-              />
-              <Card
-                label="Process Memory"
-                value={procLatest ? formatKB(procLatest.memKB) : '—'}
-                data={procSeries.mem}
-                color={COLOR_WRITE}
-                max={procMemMax}
-                slots={points}
-                format={(v) => formatKB(v)}
-                legend={
-                  procLatest && latest && latest.memTotalKB > 0
-                    ? `${((procLatest.memKB / latest.memTotalKB) * 100).toFixed(1)}% of total`
-                    : null
-                }
-              />
+              {showProcCpu && (
+                <Card
+                  label="Process CPU"
+                  value={procLatest ? `${Math.round(procLatest.cpuPct)}%` : '—'}
+                  data={procSeries.cpu}
+                  color={COLOR_UP}
+                  max={procCpuMax}
+                  slots={points}
+                  format={(v) => `${Math.round(v)}%`}
+                />
+              )}
+              {showProcMem && (
+                <Card
+                  label="Process Memory"
+                  value={procLatest ? formatKB(procLatest.memKB) : '—'}
+                  data={procSeries.mem}
+                  color={COLOR_WRITE}
+                  max={procMemMax}
+                  slots={points}
+                  format={(v) => formatKB(v)}
+                  legend={
+                    procLatest && latest && latest.memTotalKB > 0
+                      ? `${((procLatest.memKB / latest.memTotalKB) * 100).toFixed(1)}% of total`
+                      : null
+                  }
+                />
+              )}
               {procSamples.length > 0 && (
                 <div style={footRow}>
                   {/* UPTIME: how long the process has been running. WATCH: how
