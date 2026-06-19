@@ -76,7 +76,7 @@ func (m *Manager) Open(paneID string, sess profile.Session) error {
 // restore (reopening a saved leaf — true), and decides whether the pane is
 // tmux-backed:
 //   - fresh open: mint a durable token iff Session.Persist is on (the live
-//     "keep session alive" toggle), so the toggle governs new tabs.
+//     "Persistent session" toggle), so the toggle governs new tabs.
 //   - restore: NEVER mint — the pane uses tmux iff a token was saved in the
 //     layout (tmuxID != ""), the per-pane snapshot taken when it was opened.
 //     This keeps a restored pane on whatever it was (tmux or plain) regardless

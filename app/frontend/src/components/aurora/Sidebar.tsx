@@ -34,7 +34,7 @@ export type Session = {
   instanceId?: string;
   region?: string;
   awsProfile?: string;
-  // Saved keep-alive (tmux-backed durable session) default — SSH / EC2 only.
+  // Saved persistent-session (tmux-backed) default — SSH / EC2 only.
   persist?: boolean;
 };
 
@@ -43,11 +43,11 @@ type Props = {
   sessions: Session[];
   selectedSessionId: string | null;
   onSelectSession: (s: Session | null) => void;
-  // keepAlive (when passed) overrides the session's saved keep-alive default
-  // for this launch only — wired to the "Open keep-alive…" / "Open w/o
-  // keep-alive…" context-menu actions.
-  onOpenSession: (s: Session, keepAlive?: boolean) => void;
-  onOpenInCurrentTab?: (s: Session, keepAlive?: boolean) => void;
+  // persistent (when passed) overrides the session's saved persistence default
+  // for this launch only — wired to the "Open as persistent session" / "Open as
+  // non-persistent session" context-menu actions.
+  onOpenSession: (s: Session, persistent?: boolean) => void;
+  onOpenInCurrentTab?: (s: Session, persistent?: boolean) => void;
   onDuplicateSession?: (s: Session) => void;
   onAddGroup: () => void;
   onAddSession: (groupId: string) => void;
@@ -1052,19 +1052,19 @@ function sessionContextItems(
   s: Session,
   cbs: {
     setRenaming: (k: string) => void;
-    onOpenSession: (s: Session, keepAlive?: boolean) => void;
-    onOpenInCurrentTab?: (s: Session, keepAlive?: boolean) => void;
+    onOpenSession: (s: Session, persistent?: boolean) => void;
+    onOpenInCurrentTab?: (s: Session, persistent?: boolean) => void;
     onDuplicateSession?: (s: Session) => void;
     onEditSession?: (s: Session) => void;
     onDeleteSession: (id: string) => void;
     onNotice?: (msg: string, tone?: 'info' | 'success' | 'warn' | 'error') => void;
   },
 ): ContextMenuItem[] {
-  // Keep-alive override: per-launch opposite of the session's saved default,
-  // so the user can open a durable or one-off shell without editing the
-  // session. Only SSH / EC2 sessions can be tmux-backed.
-  const canKeepAlive = s.type === 'ssh' || s.type === 'awsec2';
-  const keepAlive = !s.persist; // the mode this override opens in
+  // Persistence override: per-launch opposite of the session's saved default,
+  // so the user can open a persistent or non-persistent shell without editing
+  // the session. Only SSH / EC2 sessions can be tmux-backed.
+  const canPersist = s.type === 'ssh' || s.type === 'awsec2';
+  const persistent = !s.persist; // the mode this override opens in
   return [
     { kind: 'item', label: 'Open in new tab', icon: glyphDuplicate, onClick: () => cbs.onOpenSession(s) },
     {
@@ -1073,13 +1073,13 @@ function sessionContextItems(
       icon: glyphSplit,
       onClick: () => (cbs.onOpenInCurrentTab || cbs.onOpenSession)(s),
     },
-    ...(canKeepAlive
+    ...(canPersist
       ? ([
           {
             kind: 'item',
-            label: keepAlive ? 'Open keep-alive in new tab' : 'Open w/o keep-alive in new tab',
+            label: persistent ? 'Open as persistent session' : 'Open as non-persistent session',
             icon: glyphDuplicate,
-            onClick: () => cbs.onOpenSession(s, keepAlive),
+            onClick: () => cbs.onOpenSession(s, persistent),
           },
         ] as ContextMenuItem[])
       : []),

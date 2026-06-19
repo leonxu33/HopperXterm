@@ -25,7 +25,7 @@ import {
   MoveSession,
   ReorderGroup,
   OpenPane,
-  OpenPaneKeepAlive,
+  OpenPanePersistent,
   OpenPaneInDir,
   ClosePane,
   ClosePaneKill,
@@ -744,10 +744,10 @@ function App() {
   };
 
   // ─── Tab + Pane lifecycle ────────────────────────────────────────────
-  // keepAlive overrides the session's saved Persist for this launch only
-  // (sidebar "Open keep-alive…" / "Open w/o keep-alive…"); undefined uses the
-  // saved default.
-  const openSession = async (s: Session, keepAlive?: boolean) => {
+  // persistent overrides the session's saved Persist for this launch only
+  // (sidebar "Open as persistent session" / "Open as non-persistent session");
+  // undefined uses the saved default.
+  const openSession = async (s: Session, persistent?: boolean) => {
     const paneId = newId('pane');
     const tab: Tab = {
       id: newId('tab'),
@@ -767,20 +767,20 @@ function App() {
     setSelectedSessionId(null);
     pushRecent({ kind: 'session', id: s.id });
     try {
-      await (keepAlive === undefined ? OpenPane(paneId, s.id) : OpenPaneKeepAlive(paneId, s.id, keepAlive));
+      await (persistent === undefined ? OpenPane(paneId, s.id) : OpenPanePersistent(paneId, s.id, persistent));
     } catch (e) {
       setErr(`OpenPane failed: ${String(e)}`);
       setPaneStates((cur) => ({ ...cur, [paneId]: 'Disconnected' }));
     }
   };
 
-  const openInCurrentTab = async (s: Session, keepAlive?: boolean) => {
-    if (!activeTabId) return openSession(s, keepAlive);
+  const openInCurrentTab = async (s: Session, persistent?: boolean) => {
+    if (!activeTabId) return openSession(s, persistent);
     const tab = tabs.find((t) => t.id === activeTabId);
-    if (!tab) return openSession(s, keepAlive);
+    if (!tab) return openSession(s, persistent);
     // Don't add a pane into a temporary tab — open the session in its own tab.
     if (tempTabIds.has(tab.id)) {
-      return openSession(s, keepAlive);
+      return openSession(s, persistent);
     }
     if (paneCount(tab.layout) >= PANE_LIMIT) {
       setErr(`Max ${PANE_LIMIT} panes per tab.`);
@@ -793,9 +793,9 @@ function App() {
     setSelectedSessionId(null);
     pushRecent({ kind: 'session', id: s.id });
     try {
-      await (keepAlive === undefined
+      await (persistent === undefined
         ? OpenPane(newPaneId, s.id)
-        : OpenPaneKeepAlive(newPaneId, s.id, keepAlive));
+        : OpenPanePersistent(newPaneId, s.id, persistent));
     } catch (e) {
       setErr(`OpenPane failed: ${String(e)}`);
     }

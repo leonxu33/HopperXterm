@@ -179,7 +179,7 @@ func (p *Pane) resolveTmuxLaunch(client *ssh.Client, name string) (launch string
 // durable token set in Manager.OpenInDir (minted for a fresh Persist open, or
 // restored from the workspace layout). It is deliberately NOT re-gated on the
 // live Session.Persist flag: a pane that came up on tmux stays on tmux across
-// reconnects and restarts even if the "keep session alive" toggle was flipped
+// reconnects and restarts even if the "Persistent session" toggle was flipped
 // off afterwards, so flipping it never silently downgrades a running pane (or
 // orphans its remote session) — the toggle only governs future opens.
 func (p *Pane) setupPersistence(client *ssh.Client) (launch string, runInit bool) {

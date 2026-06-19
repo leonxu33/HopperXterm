@@ -608,7 +608,7 @@ export function NewSessionModal({
           </div>
         )}
 
-        {/* Keep alive (tmux-backed durable session) — SSH / EC2 only. */}
+        {/* Persistent session (tmux-backed, processes/scrollback survive) — SSH / EC2 only. */}
         {(type === 'ssh' || type === 'awsec2') && (
           <PersistToggle value={persist} onChange={setPersist} />
         )}
@@ -649,7 +649,7 @@ function PersistToggle({ value, onChange }: { value: boolean; onChange: (v: bool
         type="button"
         role="switch"
         aria-checked={value}
-        aria-label="Keep session alive"
+        aria-label="Persistent session"
         onClick={() => onChange(!value)}
         style={{ padding: 0, border: 0, background: 'transparent', cursor: 'pointer', flex: '0 0 auto', marginTop: 1 }}
       >
@@ -682,7 +682,7 @@ function PersistToggle({ value, onChange }: { value: boolean; onChange: (v: bool
       </button>
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
         <div style={{ font: `600 ${FS.lg}px/1 ${TOKENS.font}`, color: value ? TOKENS.accent : TOKENS.fg }}>
-          Keep session alive
+          Persistent session
         </div>
         <div style={{ font: `${FS.base}px/1.4 ${TOKENS.font}`, color: TOKENS.fgMute }}>
           Runs the shell inside <span style={{ fontFamily: TOKENS.mono, color: TOKENS.fgDim }}>tmux</span> so running

@@ -215,13 +215,13 @@ func (a *App) OpenPane(paneID, sessionID string) error {
 	return a.openPaneIn(paneID, sessionID, "", "", false, nil)
 }
 
-// OpenPaneKeepAlive is OpenPane with an explicit per-launch keep-alive choice
+// OpenPanePersistent is OpenPane with an explicit per-launch persistence choice
 // that overrides the session's saved Persist default for this open only — the
 // saved session record is left untouched. Wired to the sidebar's
-// "Open keep-alive…" / "Open w/o keep-alive…" context-menu actions so the user
-// can launch a session either way without first editing it.
-func (a *App) OpenPaneKeepAlive(paneID, sessionID string, keepAlive bool) error {
-	return a.openPaneIn(paneID, sessionID, "", "", false, &keepAlive)
+// "Open as persistent session" / "Open as non-persistent session" context-menu
+// actions so the user can launch a session either way without first editing it.
+func (a *App) OpenPanePersistent(paneID, sessionID string, persistent bool) error {
+	return a.openPaneIn(paneID, sessionID, "", "", false, &persistent)
 }
 
 // OpenPaneInDir is OpenPane for workspace restore: it reopens each pane in its
@@ -236,7 +236,7 @@ func (a *App) OpenPaneInDir(paneID, sessionID, dir, tmuxID string) error {
 
 // openPaneIn resolves the session and opens a pane against it. persistOverride,
 // when non-nil, replaces the session's saved Persist on the local copy for this
-// open only (used by OpenPaneKeepAlive); nil keeps the saved default.
+// open only (used by OpenPanePersistent); nil keeps the saved default.
 func (a *App) openPaneIn(paneID, sessionID, dir, tmuxID string, restore bool, persistOverride *bool) error {
 	if paneID == "" || sessionID == "" {
 		return fmt.Errorf("OpenPane: paneId and sessionId required")

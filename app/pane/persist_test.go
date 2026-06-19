@@ -129,7 +129,7 @@ func TestPersist_WrapsAndReattachesOnDrop(t *testing.T) {
 
 // Restore is governed by the SAVED token, not the live Persist flag: a pane
 // that comes back with a tmuxID from the workspace layout stays tmux-backed
-// even though its session's "keep session alive" toggle is now OFF. (Flipping
+// even though its session's "Persistent session" toggle is now OFF. (Flipping
 // the toggle off must not silently downgrade a restored pane to a plain shell
 // and orphan its remote tmux session.)
 func TestPersist_RestoreUsesSavedTokenWhenPersistOff(t *testing.T) {
