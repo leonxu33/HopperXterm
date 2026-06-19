@@ -33,6 +33,7 @@ import {
   PREF_MON_SHOW_NET,
   PREF_MON_SHOW_PROC_CPU,
   PREF_MON_SHOW_PROC_MEM,
+  PREF_MON_LAYOUT,
 } from '../../lib/uiprefs';
 import { ProcessPicker } from '../modals/ProcessPicker';
 import type { ProcTarget } from '../modals/ProcessPicker';
@@ -566,6 +567,8 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
   const showNet = useBoolPref(PREF_MON_SHOW_NET, true);
   const showProcCpu = useBoolPref(PREF_MON_SHOW_PROC_CPU, true);
   const showProcMem = useBoolPref(PREF_MON_SHOW_PROC_MEM, true);
+  // Chart layout (persisted): 'stack' = single column, 'grid' = two per row.
+  const gridLayout = useStringPref(PREF_MON_LAYOUT, 'stack') === 'grid';
   const onResetBuffer = () => {
     resetResourceBuffer(hostKey);
   };
@@ -772,6 +775,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
               <Caret open={showSystem} />
               System
             </button>
+            <LayoutSwitch grid={gridLayout} onChange={(g) => setPref(PREF_MON_LAYOUT, g ? 'grid' : 'stack')} />
             <WindowSwitch value={win} onChange={setWin} />
           </div>
 
@@ -786,6 +790,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
               </div>
             )}
 
+            <div style={chartsBox(gridLayout)}>
             {showCpu && (
               <Card
                 label="CPU"
@@ -837,6 +842,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
                 ]}
               />
             )}
+            </div>
 
             {latest && (
               <div style={footRow}>
@@ -911,6 +917,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
                     : 'Process monitor stalled — no recent samples.'}
                 </div>
               )}
+              <div style={chartsBox(gridLayout)}>
               {showProcCpu && (
                 <Card
                   label="Process CPU"
@@ -938,6 +945,7 @@ export function ResourcePanel({ paneId, paneState, hostKey }: Props) {
                   }
                 />
               )}
+              </div>
               {procSamples.length > 0 && (
                 <div style={footRow}>
                   {/* UPTIME: how long the process has been running. WATCH: how
@@ -1004,7 +1012,6 @@ function WindowSwitch({ value, onChange }: { value: Win; onChange: (w: Win) => v
         background: 'rgba(255,255,255,0.04)',
         boxShadow: `inset 0 0 0 1px ${TOKENS.border}`,
         borderRadius: 7,
-        marginLeft: 'auto',
       }}
     >
       {opts.map((w) => {
@@ -1032,6 +1039,80 @@ function WindowSwitch({ value, onChange }: { value: Win; onChange: (w: Win) => v
             }}
           >
             {w}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Toggles the chart layout between a single column and two-per-row grid.
+function LayoutSwitch({ grid, onChange }: { grid: boolean; onChange: (grid: boolean) => void }) {
+  const opts: { value: boolean; tip: string; icon: JSX.Element }[] = [
+    {
+      value: false,
+      tip: 'Single column',
+      icon: (
+        <svg width={13} height={13} viewBox="0 0 16 16" fill="currentColor">
+          <rect x="2" y="3" width="12" height="4" rx="1" />
+          <rect x="2" y="9" width="12" height="4" rx="1" />
+        </svg>
+      ),
+    },
+    {
+      value: true,
+      tip: 'Two columns',
+      icon: (
+        <svg width={13} height={13} viewBox="0 0 16 16" fill="currentColor">
+          <rect x="2" y="3" width="5" height="4" rx="1" />
+          <rect x="9" y="3" width="5" height="4" rx="1" />
+          <rect x="2" y="9" width="5" height="4" rx="1" />
+          <rect x="9" y="9" width="5" height="4" rx="1" />
+        </svg>
+      ),
+    },
+  ];
+  return (
+    <div
+      role="radiogroup"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        padding: 2,
+        gap: 1,
+        background: 'rgba(255,255,255,0.04)',
+        boxShadow: `inset 0 0 0 1px ${TOKENS.border}`,
+        borderRadius: 7,
+        marginLeft: 'auto',
+      }}
+    >
+      {opts.map((o) => {
+        const active = o.value === grid;
+        return (
+          <button
+            key={o.tip}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            data-tip={o.tip}
+            onClick={() => onChange(o.value)}
+            style={{
+              appearance: 'none',
+              border: 0,
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              padding: '4px 7px',
+              borderRadius: 5,
+              color: active ? TOKENS.fg : TOKENS.fgDim,
+              background: active
+                ? 'linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04))'
+                : 'transparent',
+              boxShadow: active ? `inset 0 0 0 1px ${TOKENS.borderHi}` : 'none',
+              transition: 'background .12s, color .12s',
+            }}
+          >
+            {o.icon}
           </button>
         );
       })}
@@ -1444,6 +1525,14 @@ const wrap: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 10,
 // right-click anywhere in it — cards or the gaps between them — hits that
 // region's scoped context menu.
 const areaGroup: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 10 };
+// Layout for the chart cards within a monitor area: a single column ('stack')
+// or two charts per row ('grid'). The banner / footer rows stay outside this
+// box so they always span the full width.
+export function chartsBox(grid: boolean): CSSProperties {
+  return grid
+    ? { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }
+    : { display: 'flex', flexDirection: 'column', gap: 10 };
+}
 const headerRow: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, paddingBottom: 4 };
 const sysToggleBtn: CSSProperties = {
   display: 'inline-flex',

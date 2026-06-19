@@ -32,6 +32,9 @@ export const PREF_MON_SHOW_NET = 'monShowNet';
 export const PREF_MON_SHOW_PROC_CPU = 'monShowProcCpu';
 export const PREF_MON_SHOW_PROC_MEM = 'monShowProcMem';
 
+/** Resource-monitor chart layout: 'stack' (single column, default) or 'grid' (two charts per row). */
+export const PREF_MON_LAYOUT = 'monLayout';
+
 /** ID of the workspace that was active on last shutdown — restored on launch. */
 export const PREF_ACTIVE_WORKSPACE = 'activeWorkspace';
 

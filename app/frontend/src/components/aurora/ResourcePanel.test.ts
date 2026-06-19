@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hostKeyFor, getResourceBuffer, resetResourceBuffer, specOf, formatElapsed, hoverIndexAt } from './ResourcePanel';
+import { hostKeyFor, getResourceBuffer, resetResourceBuffer, specOf, formatElapsed, hoverIndexAt, chartsBox } from './ResourcePanel';
 
 describe('hostKeyFor', () => {
   it('returns null for nullish sessions', () => {
@@ -116,6 +116,20 @@ describe('hoverIndexAt', () => {
     const slots = 60;
     const x = slotXAt(30, slots, slots, w);
     expect(hoverIndexAt(x + 500, { left: 500 }, w, slots, slots)).toBe(30);
+  });
+});
+
+describe('chartsBox', () => {
+  it('stacks cards in a single column by default', () => {
+    const s = chartsBox(false);
+    expect(s.display).toBe('flex');
+    expect(s.flexDirection).toBe('column');
+  });
+
+  it('arranges cards into two equal columns in grid mode', () => {
+    const s = chartsBox(true);
+    expect(s.display).toBe('grid');
+    expect(s.gridTemplateColumns).toBe('repeat(2, minmax(0, 1fr))');
   });
 });
 
