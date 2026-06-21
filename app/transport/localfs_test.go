@@ -118,4 +118,76 @@ func TestLocalOps_EmptyPathErrors(t *testing.T) {
 	if err := LocalRename("", "x"); err == nil {
 		t.Error("LocalRename with empty src should error")
 	}
+	if err := LocalCopy("", "x"); err == nil {
+		t.Error("LocalCopy with empty src should error")
+	}
+}
+
+func TestLocalCopy_FileAndTree(t *testing.T) {
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "top.txt"), []byte("TOP"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "sub", "deep.txt"), []byte("DEEP"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Single file into a sibling target.
+	dstFile := filepath.Join(root, "copy.txt")
+	if err := LocalCopy(filepath.Join(srcDir, "top.txt"), dstFile); err != nil {
+		t.Fatalf("LocalCopy(file): %v", err)
+	}
+	if b, _ := os.ReadFile(dstFile); string(b) != "TOP" {
+		t.Errorf("copied file = %q, want TOP", b)
+	}
+
+	// Whole tree, including the nested file.
+	dstTree := filepath.Join(root, "dst")
+	if err := LocalCopy(srcDir, dstTree); err != nil {
+		t.Fatalf("LocalCopy(tree): %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dstTree, "sub", "deep.txt")); string(b) != "DEEP" {
+		t.Errorf("nested file = %q, want DEEP", b)
+	}
+}
+
+func TestLocalCopy_RejectsSelfAndDescendant(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := LocalCopy(dir, dir); err == nil {
+		t.Error("LocalCopy(x, x) should reject copying onto itself")
+	}
+	if err := LocalCopy(dir, filepath.Join(dir, "d")); err == nil {
+		t.Error("LocalCopy(x, x/sub) should reject copying into own subtree")
+	}
+	// A sibling target with a shared name prefix is fine.
+	if err := LocalCopy(dir, filepath.Join(root, "d2")); err != nil {
+		t.Errorf("LocalCopy to sibling: unexpected error %v", err)
+	}
+}
+
+func TestLocalSelfOrDescendant(t *testing.T) {
+	root := t.TempDir()
+	a := filepath.Join(root, "a")
+	cases := []struct {
+		src, dst string
+		want     bool
+	}{
+		{a, a, true},
+		{a, filepath.Join(a, "x"), true},
+		{a, filepath.Join(root, "b"), false},
+		{a, root, false},
+	}
+	for _, c := range cases {
+		if got := localSelfOrDescendant(c.src, c.dst); got != c.want {
+			t.Errorf("localSelfOrDescendant(%q,%q)=%v want %v", c.src, c.dst, got, c.want)
+		}
+	}
 }

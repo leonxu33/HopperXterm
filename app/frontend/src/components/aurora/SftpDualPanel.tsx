@@ -22,6 +22,7 @@ import {
   CancelSftpTransfer,
   FileEditOpen,
   FileOpenWith,
+  LocalCopy,
   LocalCreate,
   LocalEditOpen,
   LocalOpenWith,
@@ -31,6 +32,7 @@ import {
   LocalRemove,
   LocalRename,
   PickDirectory,
+  SftpCopyRemote,
   SftpCreate,
   SftpCwd,
   SftpDownloadDir,
@@ -324,7 +326,10 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
               (p.totalBytes ? ` (${formatSize(p.totalBytes)})` : ''),
           );
         } else if (p.state !== 'running') {
-          log.info(`[transfer] ${p.kind} ${p.state} — ${p.path} (${formatSize(p.bytes ?? 0)})`);
+          log.info(
+            `[transfer] ${p.kind} ${p.state} — ${p.path} (${formatSize(p.bytes ?? 0)})` +
+              (p.error ? `: ${p.error}` : ''),
+          );
         }
         if (isFirstEvent && p.state === 'running') {
           appendLog(
@@ -549,6 +554,39 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     });
     void loadLocal(localCwd);
   };
+  // Same-machine copies (drag within one side, dropped onto a folder row).
+  // The source dir is the pane's own cwd; destDir is the target folder path.
+  // A name whose target is its own path / subtree is skipped (copying a
+  // folder into itself); the backend guards this too. 4-at-a-time, refresh
+  // after — mirroring upload/download.
+  const copyLocalNames = async (names: string[], destDir: string) => {
+    if (names.length === 0) return;
+    await runWithConcurrency(names, 4, async (n) => {
+      const srcPath = localJoin(n);
+      const s = sep(srcPath);
+      if (destDir === srcPath || destDir.startsWith(srcPath + s)) return;
+      try {
+        await LocalCopy(srcPath, joinPath(destDir, n));
+      } catch (err) {
+        setLocalErr(String(err));
+      }
+    });
+    void loadLocal(localCwd);
+  };
+  const copyRemoteNames = async (names: string[], destDir: string) => {
+    if (!paneId || names.length === 0) return;
+    await runWithConcurrency(names, 4, async (n) => {
+      const srcPath = remoteJoin(n);
+      if (destDir === srcPath || destDir.startsWith(srcPath + '/')) return;
+      try {
+        await SftpCopyRemote(paneId, paneId, remoteCwd, [n], destDir);
+      } catch (err) {
+        setRemoteErr(String(err));
+      }
+    });
+    void loadRemote(remoteCwd);
+  };
+
   const onUploadSelected = () =>
     void uploadNames([...localSel].filter((n) => n !== '..'), remoteCwd);
   const onDownloadSelected = () =>
@@ -644,18 +682,29 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     e.dataTransfer.effectAllowed = 'copy';
   };
 
-  // dragenter/dragover on a pane: accept the drop (and show the affordance)
-  // only for an in-panel drag that started on the OPPOSITE side.
+  // dragenter/dragover on a pane: accept the drop and show the affordance.
+  // An OPPOSITE-side drag is an upload/download and drops anywhere on the
+  // pane. A SAME-side drag is a same-machine copy and is only valid onto a
+  // folder row (a different dir) — dropping onto the current folder would be
+  // a no-op, so we leave the no-drop cursor there.
   const onPaneDragHover = (e: React.DragEvent, side: 'local' | 'remote') => {
     if (!e.dataTransfer.types.includes(DUAL_DRAG_MIME)) return;
     const drag = dragRef.current;
-    if (!drag || drag.side === side) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
+    if (!drag) return;
     const { folder } =
       side === 'local'
         ? resolveDrop(e, localCwd, joinPath)
         : resolveDrop(e, remoteCwd, remoteJoinInto);
+    if (drag.side === side && folder === null) {
+      // Same-side drag over blank space / a file row: not a valid copy
+      // target. Clear any lingering folder highlight and leave the no-drop
+      // cursor (no preventDefault → onPaneDrop won't fire here).
+      setDropSide((prev) => (prev === null ? prev : null));
+      setDropFolder((prev) => (prev === null ? prev : null));
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
     // dragover fires continuously — only touch state when the target
     // actually changes so we don't re-render the (row-heavy) FileTable
     // every frame of the drag. React bails out when the updater returns
@@ -681,7 +730,19 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     setDropSide(null);
     setDropFolder(null);
     dragRef.current = null;
-    if (!drag || drag.side === side) return;
+    if (!drag) return;
+    if (drag.side === side) {
+      // Same machine → copy. Only into a folder row (a different dir);
+      // dropping onto the current folder is a no-op.
+      const { dir, folder } =
+        side === 'local'
+          ? resolveDrop(e, localCwd, joinPath)
+          : resolveDrop(e, remoteCwd, remoteJoinInto);
+      if (folder === null) return;
+      if (side === 'local') void copyLocalNames(drag.names, dir);
+      else void copyRemoteNames(drag.names, dir);
+      return;
+    }
     if (side === 'remote') {
       // local → remote = upload
       const { dir } = resolveDrop(e, remoteCwd, remoteJoinInto);

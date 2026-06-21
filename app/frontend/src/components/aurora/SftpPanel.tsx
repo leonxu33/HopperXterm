@@ -290,7 +290,7 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
       if (p.state === 'running') {
         if (p.transport) log.info(`[transfer] ${p.kind} via ${p.transport} — ${p.path}`);
       } else {
-        log.info(`[transfer] ${p.kind} ${p.state} — ${p.path}`);
+        log.info(`[transfer] ${p.kind} ${p.state} — ${p.path}${p.error ? `: ${p.error}` : ''}`);
       }
       setTransfers((cur) => {
         const idx = cur.findIndex((t) => t.id === p.id);
@@ -744,11 +744,12 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
   // OS-upload / internal-rearrange paths.
   const onRemoteFilesHover = (e: React.DragEvent): boolean => {
     if (!isRemoteFilesDrag(e)) return false;
-    if (paneId && canDropRemoteDrag(getRemoteDrag(), paneId, sessionId)) {
+    const { dir, folder } = resolveDropTarget(e);
+    if (paneId && canDropRemoteDrag(getRemoteDrag(), paneId, sessionId, dir)) {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
       setCopyOver(true);
-      setCopyTargetFolder(resolveDropTarget(e).folder);
+      setCopyTargetFolder(folder);
     }
     return true;
   };
@@ -1265,7 +1266,7 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
                 drag = null;
               }
             }
-            if (drag && canDropRemoteDrag(drag, paneId, sessionId)) void doRemoteCopy(drag, dir);
+            if (drag && canDropRemoteDrag(drag, paneId, sessionId, dir)) void doRemoteCopy(drag, dir);
             setRemoteDrag(null);
             return;
           }

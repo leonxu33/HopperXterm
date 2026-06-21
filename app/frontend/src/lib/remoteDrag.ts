@@ -36,16 +36,33 @@ export function getRemoteDrag(): RemoteDrag | null {
 }
 
 /** True when `drag` may be dropped onto a panel bound to `targetSessionId`
- *  in `targetPaneId`: there must be an active drag with at least one name,
- *  and the destination must be a *different* session (a different host).
- *  Same-session — including the same pane — is rejected. */
+ *  in `targetPaneId`. There must be an active drag with at least one name.
+ *  A drop onto the same host (the same pane, or another pane on the same
+ *  session) is allowed as a copy — except into the folder the files already
+ *  live in, which would be a no-op / self-overwrite. `destDir` is the
+ *  resolved drop directory; when known and equal to the source `cwd` on the
+ *  same host, the drop is rejected. Cross-host drops are always allowed. */
 export function canDropRemoteDrag(
   drag: RemoteDrag | null,
   targetPaneId: string,
   targetSessionId: string | null,
+  destDir?: string,
 ): boolean {
   if (!drag || drag.names.length === 0) return false;
-  if (drag.paneId === targetPaneId) return false;
-  if (drag.sessionId && targetSessionId && drag.sessionId === targetSessionId) return false;
+  const sameHost =
+    drag.paneId === targetPaneId ||
+    (!!drag.sessionId && !!targetSessionId && drag.sessionId === targetSessionId);
+  if (sameHost && destDir !== undefined && normRemoteDir(destDir) === normRemoteDir(drag.cwd)) {
+    return false;
+  }
   return true;
+}
+
+/** Normalize a POSIX remote dir for comparison: drop trailing slashes,
+ *  but never collapse a root-only path ("/" or "//") to "" — that would make
+ *  two spellings of root compare unequal. */
+function normRemoteDir(d: string): string {
+  if (d.length <= 1) return d;
+  const trimmed = d.replace(/\/+$/, '');
+  return trimmed === '' ? '/' : trimmed;
 }

@@ -40,19 +40,39 @@ describe('canDropRemoteDrag', () => {
     expect(canDropRemoteDrag(drag({ names: [] }), 'paneB', 'sessY')).toBe(false);
   });
 
-  it('rejects a drop back onto the source pane', () => {
-    expect(canDropRemoteDrag(drag({ paneId: 'paneA' }), 'paneA', 'sessY')).toBe(false);
+  it('rejects a same-pane drop into the same folder (no-op)', () => {
+    expect(canDropRemoteDrag(drag({ cwd: '/home/me' }), 'paneA', 'sessY', '/home/me')).toBe(false);
   });
 
-  it('rejects a drop onto another pane of the same session', () => {
-    expect(canDropRemoteDrag(drag({ sessionId: 'sessX' }), 'paneB', 'sessX')).toBe(false);
+  it('accepts a same-pane copy into a different folder', () => {
+    expect(canDropRemoteDrag(drag({ cwd: '/home/me' }), 'paneA', 'sessY', '/home/me/sub')).toBe(true);
   });
 
-  it('accepts a drop onto a different session', () => {
-    expect(canDropRemoteDrag(drag({ sessionId: 'sessX' }), 'paneB', 'sessY')).toBe(true);
+  it('rejects a same-session drop into the source folder (self-overwrite)', () => {
+    expect(canDropRemoteDrag(drag({ sessionId: 'sessX', cwd: '/var' }), 'paneB', 'sessX', '/var')).toBe(false);
+  });
+
+  it('accepts a same-session copy into a different folder', () => {
+    expect(canDropRemoteDrag(drag({ sessionId: 'sessX', cwd: '/var' }), 'paneB', 'sessX', '/var/log')).toBe(true);
+  });
+
+  it('ignores a trailing slash when comparing the source folder', () => {
+    expect(canDropRemoteDrag(drag({ cwd: '/home/me/' }), 'paneA', 'sessY', '/home/me')).toBe(false);
+  });
+
+  it('treats "//" and "/" as the same root folder (no collapse to "")', () => {
+    expect(canDropRemoteDrag(drag({ cwd: '//' }), 'paneA', 'sessY', '/')).toBe(false);
+  });
+
+  it('accepts a drop onto a different session regardless of folder', () => {
+    expect(canDropRemoteDrag(drag({ sessionId: 'sessX', cwd: '/x' }), 'paneB', 'sessY', '/x')).toBe(true);
   });
 
   it('accepts when session ids are unknown but panes differ', () => {
     expect(canDropRemoteDrag(drag({ sessionId: '' }), 'paneB', null)).toBe(true);
+  });
+
+  it('accepts a same-host drop when the target folder is unknown', () => {
+    expect(canDropRemoteDrag(drag({ paneId: 'paneA' }), 'paneA', 'sessY')).toBe(true);
   });
 });

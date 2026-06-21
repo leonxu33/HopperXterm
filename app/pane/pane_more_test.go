@@ -467,6 +467,68 @@ func TestSftpWrappers_NoFileClientErrors(t *testing.T) {
 	}
 }
 
+func TestSftpRelayFrom_SameHostGuard(t *testing.T) {
+	p, fc := paneWithFC()
+
+	// Same host (sameHost=true): a copy whose destination is the source
+	// path itself — or nested in it — must be rejected before any I/O.
+	if _, err := p.SftpRelayFrom(fc, "/a", []string{"foo"}, "/a", true); err == nil {
+		t.Error("same-host copy into the source dir should be rejected")
+	}
+	if _, err := p.SftpRelayFrom(fc, "/a", []string{"foo"}, "/a/foo", true); err == nil {
+		t.Error("same-host copy into the source's own subtree should be rejected")
+	}
+
+	// Same host into a different dir → allowed; relays via the file client.
+	fc.listing["/a"] = []transport.Entry{{Name: "foo", Size: 3}}
+	fc.uploadN = 3
+	if _, err := p.SftpRelayFrom(fc, "/a", []string{"foo"}, "/b", true); err != nil {
+		t.Errorf("same-host copy into a different dir should succeed: %v", err)
+	}
+	if len(fc.uploaded) == 0 {
+		t.Error("expected the relay to write to the destination")
+	}
+}
+
+func TestManager_SftpCopyRemote_SameHost(t *testing.T) {
+	m := NewManager(context.Background())
+
+	mkPane := func(id, sid string) *fakeFileClient {
+		p := newPane(context.Background(), id, profile.Session{ID: sid})
+		fc := newFakeFC()
+		p.fileMu.Lock()
+		p.file = fc
+		p.fileMu.Unlock()
+		m.mu.Lock()
+		m.panes[id] = p
+		m.mu.Unlock()
+		return fc
+	}
+
+	aFC := mkPane("A", "sess1")
+	mkPane("B", "sess1")  // a second pane on the SAME session as A
+	mkPane("C", "sess2")  // a pane on a different session (different host)
+
+	// Same pane → same host → copying into the source dir is rejected.
+	if _, err := m.SftpCopyRemote("A", "A", "/d", []string{"f"}, "/d"); err == nil {
+		t.Error("same-pane copy into the source dir should be rejected")
+	}
+	// Two panes, same session → still the same host → rejected.
+	if _, err := m.SftpCopyRemote("A", "B", "/d", []string{"f"}, "/d"); err == nil {
+		t.Error("same-session copy into the source dir should be rejected")
+	}
+	// Different session → different host → the identical path string is two
+	// distinct files, so the copy proceeds.
+	aFC.listing["/d"] = []transport.Entry{{Name: "f", Size: 2}}
+	if _, err := m.SftpCopyRemote("A", "C", "/d", []string{"f"}, "/d"); err != nil {
+		t.Errorf("cross-host copy of the same path should be allowed: %v", err)
+	}
+	// Unknown source pane → error.
+	if _, err := m.SftpCopyRemote("ghost", "A", "/d", []string{"f"}, "/d"); err == nil {
+		t.Error("unknown source pane should error")
+	}
+}
+
 func TestSftpUpload_EmitsTransfer(t *testing.T) {
 	p, fc := paneWithFC()
 	fc.uploadN = 42

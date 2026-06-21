@@ -150,6 +150,25 @@ func TestJoinRemote(t *testing.T) {
 	}
 }
 
+func TestIsRemoteSelfOrDescendant(t *testing.T) {
+	cases := []struct {
+		src, dst string
+		want     bool
+	}{
+		{"/a/foo", "/a/foo", true},      // same path
+		{"/a/foo", "/a/foo/", true},     // trailing slash, still same
+		{"/a/foo", "/a/foo/foo", true},  // dst nested in src (folder into itself)
+		{"/a/foo", "/a/bar/foo", false}, // sibling folder
+		{"/a/foo", "/a/foobar", false},  // shared prefix, not nested
+		{"/a", "/a/foo", true},          // child
+	}
+	for _, c := range cases {
+		if got := isRemoteSelfOrDescendant(c.src, c.dst); got != c.want {
+			t.Errorf("isRemoteSelfOrDescendant(%q,%q)=%v want %v", c.src, c.dst, got, c.want)
+		}
+	}
+}
+
 func TestRelaySize_Tree(t *testing.T) {
 	src := newMemFS()
 	_ = src.Mkdir("/d/x", true)

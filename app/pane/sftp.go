@@ -2,8 +2,11 @@ package pane
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -293,10 +296,28 @@ func (p *Pane) SftpUpload(localPath, remotePath string) (uint64, error) {
 // drives one call per dropped entry (so each gets its own transfer row),
 // but the cumulative `base` accounting also makes a multi-name batch
 // report correctly if called that way.
-func (p *Pane) SftpRelayFrom(src transport.FileClient, srcDir string, names []string, dstDir string) (uint64, error) {
+//
+// sameHost marks src and dst as the same physical host (the same pane, or
+// two panes on one session). In that case a name whose destination is the
+// source path itself — or a directory nested inside it — is rejected, since
+// the copy would overwrite the source mid-read or recurse into its own
+// subtree. Cross-host copies skip the check (a shared path string is two
+// distinct files on two filesystems).
+func (p *Pane) SftpRelayFrom(src transport.FileClient, srcDir string, names []string, dstDir string, sameHost bool) (uint64, error) {
 	dst, err := p.fileClient()
 	if err != nil {
 		return 0, err
+	}
+
+	if sameHost {
+		for _, n := range names {
+			if isSkippableEntry(n) {
+				continue
+			}
+			if isRemoteSelfOrDescendant(joinRemote(srcDir, n), joinRemote(dstDir, n)) {
+				return 0, fmt.Errorf("pane: cannot copy %q onto itself", n)
+			}
+		}
 	}
 
 	// Pre-walk the source to seed TotalBytes (best-effort; a failed
@@ -415,6 +436,18 @@ func relaySize(c transport.FileClient, path string) int64 {
 // the empty name — none of which should be copied or counted.
 func isSkippableEntry(name string) bool {
 	return name == "" || name == "." || name == ".."
+}
+
+// isRemoteSelfOrDescendant reports whether POSIX path dst equals src or is
+// nested inside it — used to block a same-host copy from overwriting the
+// source file or recursing a directory into its own subtree.
+func isRemoteSelfOrDescendant(src, dst string) bool {
+	src = path.Clean(src)
+	dst = path.Clean(dst)
+	if src == dst {
+		return true
+	}
+	return strings.HasPrefix(dst, src+"/")
 }
 
 // joinRemote joins a POSIX remote directory and a name. Remote file paths

@@ -7,8 +7,10 @@ package transport
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // LocalList returns the directory entries at dir, sorted folders-first
@@ -138,4 +140,94 @@ func LocalRename(src, dst string) error {
 		return errors.New("transport: empty path")
 	}
 	return os.Rename(src, dst)
+}
+
+// LocalCopy recursively copies src → dst on the local filesystem (the
+// backend for same-machine drag-to-copy in the Local pane). Files preserve
+// their permission bits; symlinks are recreated rather than followed. It
+// refuses to copy a path onto itself or into its own subtree, which would
+// overwrite the source mid-read or recurse forever.
+func LocalCopy(src, dst string) error {
+	src = expandPath(src)
+	dst = expandPath(dst)
+	if src == "" || dst == "" {
+		return errors.New("transport: empty path")
+	}
+	absSrc, err := filepath.Abs(src)
+	if err != nil {
+		return err
+	}
+	absDst, err := filepath.Abs(dst)
+	if err != nil {
+		return err
+	}
+	if localSelfOrDescendant(absSrc, absDst) {
+		return fmt.Errorf("transport: cannot copy %q into itself", src)
+	}
+	return localCopyPath(absSrc, absDst)
+}
+
+// localSelfOrDescendant reports whether dst equals src or is nested inside
+// it. filepath.Rel handles Windows case-insensitivity on the shared prefix.
+func localSelfOrDescendant(src, dst string) bool {
+	rel, err := filepath.Rel(src, dst)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	// A relative path that doesn't climb out of src (no leading "..") means
+	// dst sits inside the src tree.
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// localCopyPath copies a file, directory tree, or symlink from src to dst.
+// Assumes the self/descendant check already passed.
+func localCopyPath(src, dst string) error {
+	st, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		return os.Symlink(target, dst)
+	}
+	if st.IsDir() {
+		if err := os.MkdirAll(dst, st.Mode().Perm()); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := localCopyPath(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return localCopyFile(src, dst, st.Mode().Perm())
+}
+
+// localCopyFile copies one regular file's contents, creating dst with perm.
+func localCopyFile(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }

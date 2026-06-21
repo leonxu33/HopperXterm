@@ -352,6 +352,13 @@ func (a *App) LocalRename(src, dst string) error {
 	return transport.LocalRename(src, dst)
 }
 
+// LocalCopy recursively copies a local path src → dst — the backend for
+// same-machine drag-to-copy in the dual-pane browser's Local pane. Refuses
+// to copy a path onto itself or into its own subtree.
+func (a *App) LocalCopy(src, dst string) error {
+	return transport.LocalCopy(src, dst)
+}
+
 // LocalCreate writes an empty file at the given local path.
 func (a *App) LocalCreate(path string) error {
 	return transport.LocalCreate(path)

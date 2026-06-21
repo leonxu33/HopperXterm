@@ -365,14 +365,12 @@ func (m *Manager) SftpUpload(paneID, local, remote string) (uint64, error) {
 }
 
 // SftpCopyRemote copies the named entries from srcDir on the source pane
-// into dstDir on the destination pane — a server-to-server transfer for
-// cross-pane drag-and-drop. The transfer (progress + cancel) is owned by
-// the destination pane. Rejects a same-pane copy; the frontend also
-// blocks same-session drops, so this is a defensive backstop.
+// into dstDir on the destination pane. Across panes it's a server-to-server
+// transfer; within one pane (or two panes on the same host) it's a
+// same-host copy. The transfer (progress + cancel) is owned by the
+// destination pane. A same-host copy that would land on the source path
+// itself is rejected by the relay's self/descendant guard.
 func (m *Manager) SftpCopyRemote(srcPaneID, dstPaneID, srcDir string, names []string, dstDir string) (uint64, error) {
-	if srcPaneID == dstPaneID {
-		return 0, errors.New("pane: cannot copy to the same pane")
-	}
 	srcP, ok := m.get(srcPaneID)
 	if !ok {
 		return 0, errors.New("pane: source not found")
@@ -385,7 +383,11 @@ func (m *Manager) SftpCopyRemote(srcPaneID, dstPaneID, srcDir string, names []st
 	if err != nil {
 		return 0, err
 	}
-	return dstP.SftpRelayFrom(srcClient, srcDir, names, dstDir)
+	// Same physical host → guard against overwriting the source. The same
+	// pane is trivially the same host; so are two panes sharing a session.
+	sameHost := srcPaneID == dstPaneID ||
+		(srcP.SessionID != "" && srcP.SessionID == dstP.SessionID)
+	return dstP.SftpRelayFrom(srcClient, srcDir, names, dstDir, sameHost)
 }
 
 // StartResourceMonitor begins streaming resource:sample events for the pane.
