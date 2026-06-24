@@ -1359,6 +1359,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
                 startRowDrag(e, entry, 'local', localSel, setLocalSel, setLocalAnchor)
               }
               dropHighlightName={dropSide === 'local' ? dropFolder : null}
+              renamingName={renamingLocal}
               renderCell={(r, k) =>
                 renderDualCell(r, k, renamingLocal, (o, n) => void commitLocalRename(o, n), () =>
                   setRenamingLocal(null),
@@ -1479,6 +1480,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
                 startRowDrag(e, entry, 'remote', remoteSel, setRemoteSel, setRemoteAnchor)
               }
               dropHighlightName={dropSide === 'remote' ? dropFolder : null}
+              renamingName={renamingRemote}
               renderCell={(r, k) =>
                 renderDualCell(r, k, renamingRemote, (o, n) => void commitRemoteRename(o, n), () =>
                   setRenamingRemote(null),

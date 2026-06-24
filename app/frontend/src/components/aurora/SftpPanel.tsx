@@ -1301,6 +1301,7 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
         draggableRows
         onRowDragStart={onRowDragStart}
         dropHighlightName={copyOver ? copyTargetFolder : null}
+        renamingName={renaming}
         rowsContainerRef={rowsRef}
         rowTitle={(e) => (e.isSymlink && e.target ? `→ ${e.target}` : undefined)}
         emptyContent={

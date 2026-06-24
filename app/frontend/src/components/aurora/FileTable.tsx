@@ -136,6 +136,10 @@ export type FileTableProps<K extends string> = {
   // Name of the row to render as the active drop target (an accent ring),
   // e.g. the folder a cross-pane file drag is hovering. null = none.
   dropHighlightName?: string | null;
+  // Name of the row currently being renamed. That row is made non-draggable
+  // so a mouse drag inside the rename input selects text (a draggable
+  // ancestor would otherwise preempt text selection with a native drag).
+  renamingName?: string | null;
 };
 
 export function FileTable<K extends string>({
@@ -161,6 +165,7 @@ export function FileTable<K extends string>({
   onRowDrop,
   onContainerDrop,
   dropHighlightName,
+  renamingName,
 }: FileTableProps<K>) {
   const [colWidths, setColWidths] = useState<Record<string, number>>(() => {
     const init: Record<string, number> = {};
@@ -391,7 +396,7 @@ export function FileTable<K extends string>({
               // an ancestor walks up from e.target to find these).
               data-entry-name={r.name}
               data-entry-dir={r.isDir ? '1' : undefined}
-              draggable={draggableRows || undefined}
+              draggable={(draggableRows && r.name !== renamingName) || undefined}
               onDragStart={onRowDragStart ? (e) => onRowDragStart(e, r) : undefined}
               onDragOver={onRowDrop ? (e) => e.preventDefault() : undefined}
               onDrop={onRowDrop ? (e) => onRowDrop(e, r) : undefined}
