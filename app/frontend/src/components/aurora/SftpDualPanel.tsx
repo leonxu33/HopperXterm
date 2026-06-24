@@ -22,7 +22,6 @@ import {
   CancelSftpTransfer,
   FileEditOpen,
   FileOpenWith,
-  LocalCopy,
   LocalCreate,
   LocalEditOpen,
   LocalOpenWith,
@@ -32,7 +31,6 @@ import {
   LocalRemove,
   LocalRename,
   PickDirectory,
-  SftpCopyRemote,
   SftpCreate,
   SftpCwd,
   SftpDownloadDir,
@@ -554,32 +552,34 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     });
     void loadLocal(localCwd);
   };
-  // Same-machine copies (drag within one side, dropped onto a folder row).
+  // Same-machine moves (drag within one side, dropped onto a folder row).
+  // A drag within the same pane is a move (rename into the target folder),
+  // not a copy — matching OS file-manager behavior for same-window drags.
   // The source dir is the pane's own cwd; destDir is the target folder path.
-  // A name whose target is its own path / subtree is skipped (copying a
+  // A name whose target is its own path / subtree is skipped (moving a
   // folder into itself); the backend guards this too. 4-at-a-time, refresh
   // after — mirroring upload/download.
-  const copyLocalNames = async (names: string[], destDir: string) => {
+  const moveLocalNames = async (names: string[], destDir: string) => {
     if (names.length === 0) return;
     await runWithConcurrency(names, 4, async (n) => {
       const srcPath = localJoin(n);
       const s = sep(srcPath);
       if (destDir === srcPath || destDir.startsWith(srcPath + s)) return;
       try {
-        await LocalCopy(srcPath, joinPath(destDir, n));
+        await LocalRename(srcPath, joinPath(destDir, n));
       } catch (err) {
         setLocalErr(String(err));
       }
     });
     void loadLocal(localCwd);
   };
-  const copyRemoteNames = async (names: string[], destDir: string) => {
+  const moveRemoteNames = async (names: string[], destDir: string) => {
     if (!paneId || names.length === 0) return;
     await runWithConcurrency(names, 4, async (n) => {
       const srcPath = remoteJoin(n);
       if (destDir === srcPath || destDir.startsWith(srcPath + '/')) return;
       try {
-        await SftpCopyRemote(paneId, paneId, remoteCwd, [n], destDir);
+        await SftpRename(paneId, srcPath, remoteJoinInto(destDir, n));
       } catch (err) {
         setRemoteErr(String(err));
       }
@@ -621,21 +621,28 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
   };
 
   // ── Local⇄Remote drag-and-drop handlers ───────────────────────────
-  // Resolve where a drop lands: dropping onto a directory row copies INTO
-  // that folder; anywhere else (empty space, a file row, "..") copies into
-  // the pane's current folder. Walks up from the event target to the
-  // FileTable row, which carries data-entry-name / data-entry-dir.
+  // Resolve where a drop lands: dropping onto a directory row lands INTO
+  // that folder; dropping onto the ".." shortcut lands in the PARENT folder;
+  // anywhere else (empty space, a file row) lands in the pane's current
+  // folder. Walks up from the event target to the FileTable row, which
+  // carries data-entry-name / data-entry-dir.
   const resolveDrop = (
     e: React.DragEvent,
     baseCwd: string,
     into: (dir: string, name: string) => string,
+    parent: (dir: string) => string,
   ): { dir: string; folder: string | null } => {
     let el = e.target as HTMLElement | null;
     const container = e.currentTarget as HTMLElement;
     while (el && el !== container) {
       const name = el.dataset?.entryName;
       if (name) {
-        if (el.dataset.entryDir === '1' && name !== '..') {
+        if (name === '..') {
+          const up = parent(baseCwd);
+          // Already at root → nowhere to go up, treat as the current folder.
+          return up === baseCwd ? { dir: baseCwd, folder: null } : { dir: up, folder: '..' };
+        }
+        if (el.dataset.entryDir === '1') {
           return { dir: into(baseCwd, name), folder: name };
         }
         return { dir: baseCwd, folder: null };
@@ -684,7 +691,7 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
 
   // dragenter/dragover on a pane: accept the drop and show the affordance.
   // An OPPOSITE-side drag is an upload/download and drops anywhere on the
-  // pane. A SAME-side drag is a same-machine copy and is only valid onto a
+  // pane. A SAME-side drag is a same-pane move and is only valid onto a
   // folder row (a different dir) — dropping onto the current folder would be
   // a no-op, so we leave the no-drop cursor there.
   const onPaneDragHover = (e: React.DragEvent, side: 'local' | 'remote') => {
@@ -693,8 +700,8 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     if (!drag) return;
     const { folder } =
       side === 'local'
-        ? resolveDrop(e, localCwd, joinPath)
-        : resolveDrop(e, remoteCwd, remoteJoinInto);
+        ? resolveDrop(e, localCwd, joinPath, parentOf)
+        : resolveDrop(e, remoteCwd, remoteJoinInto, remoteParentDir);
     if (drag.side === side && folder === null) {
       // Same-side drag over blank space / a file row: not a valid copy
       // target. Clear any lingering folder highlight and leave the no-drop
@@ -732,24 +739,24 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     dragRef.current = null;
     if (!drag) return;
     if (drag.side === side) {
-      // Same machine → copy. Only into a folder row (a different dir);
+      // Same pane → move. Only into a folder row (a different dir);
       // dropping onto the current folder is a no-op.
       const { dir, folder } =
         side === 'local'
-          ? resolveDrop(e, localCwd, joinPath)
-          : resolveDrop(e, remoteCwd, remoteJoinInto);
+          ? resolveDrop(e, localCwd, joinPath, parentOf)
+          : resolveDrop(e, remoteCwd, remoteJoinInto, remoteParentDir);
       if (folder === null) return;
-      if (side === 'local') void copyLocalNames(drag.names, dir);
-      else void copyRemoteNames(drag.names, dir);
+      if (side === 'local') void moveLocalNames(drag.names, dir);
+      else void moveRemoteNames(drag.names, dir);
       return;
     }
     if (side === 'remote') {
       // local → remote = upload
-      const { dir } = resolveDrop(e, remoteCwd, remoteJoinInto);
+      const { dir } = resolveDrop(e, remoteCwd, remoteJoinInto, remoteParentDir);
       void uploadNames(drag.names, dir);
     } else {
       // remote → local = download
-      const { dir } = resolveDrop(e, localCwd, joinPath);
+      const { dir } = resolveDrop(e, localCwd, joinPath, parentOf);
       void downloadNames(drag.names, dir);
     }
   };

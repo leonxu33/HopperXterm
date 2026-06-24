@@ -655,10 +655,11 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
   // lands in the current folder). Drives the "Copy into …" overlay label.
   const [copyTargetFolder, setCopyTargetFolder] = useState<string | null>(null);
 
-  // Resolve where a cross-pane drop lands: dropping onto a directory row
-  // copies INTO that folder; anywhere else (empty space, a file row, the
-  // ".." shortcut) copies into the current folder. Walks up from the event
-  // target to the FileTable row, which carries data-entry-name/-dir.
+  // Resolve where a drop lands: dropping onto a directory row lands INTO
+  // that folder; dropping onto the ".." shortcut lands in the PARENT folder;
+  // anywhere else (empty space, a file row) lands in the current folder.
+  // Walks up from the event target to the FileTable row, which carries
+  // data-entry-name/-dir.
   const resolveDropTarget = (e: React.DragEvent): { dir: string; folder: string | null } => {
     let el = e.target as HTMLElement | null;
     while (el && el !== e.currentTarget) {
@@ -666,7 +667,12 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
       // Truthy (not just non-null) so an empty entry name can't become a
       // malformed "cwd/" target — fall through to the current folder instead.
       if (name) {
-        if (el.dataset.entryDir === '1' && name !== '..') {
+        if (name === '..') {
+          const up = parentDir(cwd);
+          // Already at root → nowhere to go up, treat as the current folder.
+          return up === cwd ? { dir: cwd, folder: null } : { dir: up, folder: '..' };
+        }
+        if (el.dataset.entryDir === '1') {
           return { dir: joinPath(cwd, name), folder: name };
         }
         return { dir: cwd, folder: null };
@@ -729,6 +735,24 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
     await runWithConcurrency(drag.names, 4, async (name) => {
       try {
         await SftpCopyRemote(drag.paneId, paneId!, drag.cwd, [name], destDir);
+      } catch (e) {
+        showErr(String(e));
+      }
+    });
+    await loadDir(cwd);
+  };
+
+  // A drag that originated in THIS pane is a move (rename into the target
+  // folder) rather than a copy — matching OS file-manager behavior for a
+  // same-window drag. A name whose target is its own subtree is skipped
+  // (the backend guards this too).
+  const doRemoteMove = async (drag: RemoteDrag, destDir: string) => {
+    if (!paneId) return;
+    await runWithConcurrency(drag.names, 4, async (name) => {
+      const srcPath = joinPath(drag.cwd, name);
+      if (destDir === srcPath || destDir.startsWith(srcPath + '/')) return;
+      try {
+        await SftpRename(paneId, srcPath, joinPath(destDir, name));
       } catch (e) {
         showErr(String(e));
       }
@@ -1266,7 +1290,11 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
                 drag = null;
               }
             }
-            if (drag && canDropRemoteDrag(drag, paneId, sessionId, dir)) void doRemoteCopy(drag, dir);
+            if (drag && canDropRemoteDrag(drag, paneId, sessionId, dir)) {
+              // Same pane → move; another pane (even same host) → copy.
+              if (drag.paneId === paneId) void doRemoteMove(drag, dir);
+              else void doRemoteCopy(drag, dir);
+            }
             setRemoteDrag(null);
             return;
           }
