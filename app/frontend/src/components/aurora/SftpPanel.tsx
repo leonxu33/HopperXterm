@@ -11,6 +11,7 @@ import {
   FileEditList,
   FileEditOpen,
   FileEditStop,
+  FileOpen,
   FileOpenWith,
   DisableCwdFollow,
   EnableCwdFollow,
@@ -404,9 +405,11 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
     return () => clearInterval(t);
   }, [hasSavedBadge]);
 
-  const onEditEntry = (name: string, useEditor: boolean) => {
+  // 'open' = default associated program, 'openWith' = OS chooser, 'edit' =
+  // forced text editor. All three download → watch → re-upload on save.
+  const onEditEntry = (name: string, mode: 'open' | 'openWith' | 'edit') => {
     if (!paneId) return;
-    const fn = useEditor ? FileEditOpen : FileOpenWith;
+    const fn = mode === 'edit' ? FileEditOpen : mode === 'openWith' ? FileOpenWith : FileOpen;
     void fn(paneId, joinPath(cwd, name)).catch((e) => showErr(String(e)));
   };
 
@@ -509,9 +512,9 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
     if (e.isDir) {
       void loadDir(joinPath(cwd, e.name));
     } else {
-      // Open the file for editing (download → text editor → re-upload on
-      // save). Download stays available via the toolbar / right-click.
-      onEditEntry(e.name, true);
+      // Open the file in its default program (download → open → re-upload on
+      // save). Edit / Download stay available via the right-click menu.
+      onEditEntry(e.name, 'open');
     }
   };
 
@@ -883,15 +886,17 @@ export function SftpPanel({ paneId, paneState, sessionId }: Props) {
     const isFile = !!singleEntry && !singleEntry.isDir;
     const items: ContextMenuItem[] = [];
     if (single && isFile) {
-      // Edit downloads to a temp copy, opens it in a text editor, and
-      // re-uploads on save. These lead the menu — the primary file action.
-      items.push({ kind: 'item', label: 'Edit', onClick: () => onEditEntry(single, true) });
+      // All three download to a temp copy and re-upload on save; they differ
+      // only in how the local copy is launched. Open (default program) leads —
+      // the primary action, matching double-click.
+      items.push({ kind: 'item', label: 'Open', onClick: () => onEditEntry(single, 'open') });
       // Open with… only on Windows, where it shows the native chooser. On
-      // mac/Linux it would just open the default app (no chooser), so it's
-      // hidden there to avoid a misleading "Open with…" that doesn't choose.
+      // mac/Linux it would just open the default app (same as "Open"), so it's
+      // hidden there to avoid a redundant entry.
       if (isWindows()) {
-        items.push({ kind: 'item', label: 'Open with…', onClick: () => onEditEntry(single, false) });
+        items.push({ kind: 'item', label: 'Open with…', onClick: () => onEditEntry(single, 'openWith') });
       }
+      items.push({ kind: 'item', label: 'Edit', onClick: () => onEditEntry(single, 'edit') });
       items.push({ kind: 'separator' });
     }
     if (single) {

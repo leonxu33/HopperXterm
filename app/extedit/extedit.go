@@ -33,6 +33,20 @@ import (
 	"hopperxterm/logbook"
 )
 
+// OpenMode selects how an external-edit / open launches the local file.
+type OpenMode int
+
+const (
+	// OpenDefault opens the file with its default associated program (the OS
+	// "double-click" behavior): `start` on Windows, `open` / `xdg-open` else.
+	OpenDefault OpenMode = iota
+	// OpenChooser shows an "open with" app chooser (Windows' native dialog);
+	// macOS / Linux lack a CLI chooser, so they fall back to OpenDefault.
+	OpenChooser
+	// OpenEditor forces the file into a text editor.
+	OpenEditor
+)
+
 // Transferer is the subset of the pane manager the watcher needs. Both
 // methods are synchronous (block until the transfer finishes or errors), so
 // the download completes before we launch the editor and an upload's outcome
@@ -72,7 +86,7 @@ type Manager struct {
 
 	// launcher runs the external program. A field so tests can inject a
 	// no-op instead of really launching notepad / open / xdg-open.
-	launcher func(local string, useEditor bool, editor string) error
+	launcher func(local string, mode OpenMode, editor string) error
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -105,11 +119,11 @@ func New(ctx context.Context, tx Transferer, editorPref func() string) *Manager 
 }
 
 // Open downloads remotePath to a local temp copy, launches it, and starts
-// watching for saves. useEditor true forces a text editor; false uses the OS
-// "open with" path (native chooser on Windows, default association elsewhere).
-// Opening a file already being edited reuses the existing session (and just
-// re-launches the app), so a double-open doesn't race two watchers.
-func (m *Manager) Open(paneID, remotePath string, useEditor bool) (string, error) {
+// watching for saves. mode picks the launcher (default program / chooser /
+// text editor). Opening a file already being edited reuses the existing
+// session (and just re-launches the app), so a double-open doesn't race two
+// watchers.
+func (m *Manager) Open(paneID, remotePath string, mode OpenMode) (string, error) {
 	if paneID == "" || remotePath == "" {
 		return "", errors.New("extedit: paneID and remotePath required")
 	}
@@ -120,7 +134,7 @@ func (m *Manager) Open(paneID, remotePath string, useEditor bool) (string, error
 		m.mu.Unlock()
 		// Surface a relaunch failure (e.g. the editor binary went missing)
 		// rather than silently reporting success.
-		return id, m.launcher(local, useEditor, m.editorPref())
+		return id, m.launcher(local, mode, m.editorPref())
 	}
 	m.mu.Unlock()
 
@@ -138,7 +152,7 @@ func (m *Manager) Open(paneID, remotePath string, useEditor bool) (string, error
 	}
 	_ = os.Chmod(local, 0o600) // remote content at rest — owner-only
 
-	if err := m.launcher(local, useEditor, m.editorPref()); err != nil {
+	if err := m.launcher(local, mode, m.editorPref()); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", fmt.Errorf("extedit: launch: %w", err)
 	}
@@ -279,14 +293,14 @@ func (m *Manager) Shutdown() {
 }
 
 // OpenLocal launches a local file directly in an external app — no temp copy
-// and no watcher, since the app edits the real file in place. useEditor true
-// forces a text editor; false uses the OS "open with" path (Windows chooser /
-// default association elsewhere). Used by the dual-pane browser's local side.
-func (m *Manager) OpenLocal(path string, useEditor bool) error {
+// and no watcher, since the app edits the real file in place. mode picks the
+// launcher (default program / chooser / text editor). Used by the dual-pane
+// browser's local side.
+func (m *Manager) OpenLocal(path string, mode OpenMode) error {
 	if path == "" {
 		return errors.New("extedit: path required")
 	}
-	if err := m.launcher(path, useEditor, m.editorPref()); err != nil {
+	if err := m.launcher(path, mode, m.editorPref()); err != nil {
 		return fmt.Errorf("extedit: launch: %w", err)
 	}
 	return nil
@@ -317,12 +331,15 @@ func (m *Manager) emit(s *session, state, errMsg string) {
 
 // launch runs the external program detached, reaping it in the background so
 // it doesn't linger as a zombie.
-func launch(local string, useEditor bool, editor string) error {
+func launch(local string, mode OpenMode, editor string) error {
 	var cmd *exec.Cmd
-	if useEditor {
+	switch mode {
+	case OpenEditor:
 		cmd = openInEditor(local, editor)
-	} else {
+	case OpenChooser:
 		cmd = openWith(local)
+	default:
+		cmd = openDefault(local)
 	}
 	if err := cmd.Start(); err != nil {
 		return err

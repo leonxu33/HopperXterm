@@ -67,7 +67,7 @@ func newTestManager(t *testing.T, tx Transferer) *Manager {
 	uploadRetryCooldown = 30 * time.Millisecond
 	m := New(context.Background(), tx, func() string { return "" })
 	m.tmpRoot = t.TempDir()
-	m.launcher = func(string, bool, string) error { return nil }
+	m.launcher = func(string, OpenMode, string) error { return nil }
 	t.Cleanup(m.Shutdown)
 	return m
 }
@@ -89,7 +89,7 @@ func TestOpenDownloadsAndDoesNotImmediatelyUpload(t *testing.T) {
 	tx := &fakeTx{downloadSrc: []byte("v1")}
 	m := newTestManager(t, tx)
 
-	id, err := m.Open("pane1", "/remote/file.txt", true)
+	id, err := m.Open("pane1", "/remote/file.txt", OpenEditor)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestSaveTriggersUpload(t *testing.T) {
 	tx := &fakeTx{downloadSrc: []byte("v1")}
 	m := newTestManager(t, tx)
 
-	id, err := m.Open("pane1", "/remote/file.txt", true)
+	id, err := m.Open("pane1", "/remote/file.txt", OpenEditor)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestUploadRetriesAfterFailure(t *testing.T) {
 	tx := &fakeTx{downloadSrc: []byte("v1"), failUploads: true}
 	m := newTestManager(t, tx)
 
-	if _, err := m.Open("pane1", "/remote/file.txt", true); err != nil {
+	if _, err := m.Open("pane1", "/remote/file.txt", OpenEditor); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	local := m.List()[0].LocalPath
@@ -160,7 +160,7 @@ func TestStopRemovesTempCopyAndSession(t *testing.T) {
 	tx := &fakeTx{downloadSrc: []byte("v1")}
 	m := newTestManager(t, tx)
 
-	id, err := m.Open("pane1", "/remote/file.txt", true)
+	id, err := m.Open("pane1", "/remote/file.txt", OpenEditor)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -183,11 +183,11 @@ func TestOpenSameFileReusesSession(t *testing.T) {
 	tx := &fakeTx{downloadSrc: []byte("v1")}
 	m := newTestManager(t, tx)
 
-	id1, err := m.Open("pane1", "/remote/file.txt", true)
+	id1, err := m.Open("pane1", "/remote/file.txt", OpenEditor)
 	if err != nil {
 		t.Fatalf("Open #1: %v", err)
 	}
-	id2, err := m.Open("pane1", "/remote/file.txt", false)
+	id2, err := m.Open("pane1", "/remote/file.txt", OpenDefault)
 	if err != nil {
 		t.Fatalf("Open #2: %v", err)
 	}
@@ -202,20 +202,20 @@ func TestOpenSameFileReusesSession(t *testing.T) {
 func TestOpenLocalLaunchesWithoutSession(t *testing.T) {
 	m := newTestManager(t, &fakeTx{})
 	var gotPath string
-	var gotEditor bool
+	var gotMode OpenMode
 	calls := 0
-	m.launcher = func(path string, useEditor bool, _ string) error {
+	m.launcher = func(path string, mode OpenMode, _ string) error {
 		calls++
 		gotPath = path
-		gotEditor = useEditor
+		gotMode = mode
 		return nil
 	}
-	if err := m.OpenLocal("/tmp/foo.txt", true); err != nil {
+	if err := m.OpenLocal("/tmp/foo.txt", OpenEditor); err != nil {
 		t.Fatalf("OpenLocal: %v", err)
 	}
-	// It must launch exactly once, with the path and useEditor=true passed through.
-	if calls != 1 || gotPath != "/tmp/foo.txt" || !gotEditor {
-		t.Fatalf("launcher not invoked as expected: calls=%d path=%q editor=%v", calls, gotPath, gotEditor)
+	// It must launch exactly once, with the path and mode passed through.
+	if calls != 1 || gotPath != "/tmp/foo.txt" || gotMode != OpenEditor {
+		t.Fatalf("launcher not invoked as expected: calls=%d path=%q mode=%v", calls, gotPath, gotMode)
 	}
 	// OpenLocal edits in place — it must not register a session or temp copy.
 	if got := len(m.List()); got != 0 {
@@ -225,7 +225,7 @@ func TestOpenLocalLaunchesWithoutSession(t *testing.T) {
 
 func TestOpenLocalRequiresPath(t *testing.T) {
 	m := newTestManager(t, &fakeTx{})
-	if err := m.OpenLocal("", true); err == nil {
+	if err := m.OpenLocal("", OpenEditor); err == nil {
 		t.Fatal("expected error for empty path")
 	}
 }
@@ -234,10 +234,10 @@ func TestStopForPaneStopsOnlyThatPane(t *testing.T) {
 	tx := &fakeTx{downloadSrc: []byte("v1")}
 	m := newTestManager(t, tx)
 
-	if _, err := m.Open("pane1", "/a.txt", true); err != nil {
+	if _, err := m.Open("pane1", "/a.txt", OpenEditor); err != nil {
 		t.Fatalf("Open a: %v", err)
 	}
-	if _, err := m.Open("pane2", "/b.txt", true); err != nil {
+	if _, err := m.Open("pane2", "/b.txt", OpenEditor); err != nil {
 		t.Fatalf("Open b: %v", err)
 	}
 	m.StopForPane("pane1")

@@ -572,26 +572,39 @@ func (a *App) ReleaseAllPanes() error {
 // Returns an edit-session ID; progress / save / error ride the global
 // "extedit:event" channel.
 func (a *App) FileEditOpen(paneID, remotePath string) (string, error) {
-	return a.extedit.Open(paneID, remotePath, true)
+	return a.extedit.Open(paneID, remotePath, extedit.OpenEditor)
 }
 
-// FileOpenWith is FileEditOpen via the OS "open with" path instead of a forced
-// text editor — Windows shows its native chooser; macOS / Linux use the file's
-// default association. The same download → watch → re-upload round-trip runs.
+// FileOpen is FileEditOpen via the file's default associated program (the OS
+// "double-click" behavior) instead of a forced text editor. The same
+// download → watch → re-upload round-trip runs.
+func (a *App) FileOpen(paneID, remotePath string) (string, error) {
+	return a.extedit.Open(paneID, remotePath, extedit.OpenDefault)
+}
+
+// FileOpenWith is FileEditOpen via the OS "open with" chooser instead of a
+// forced text editor — Windows shows its native chooser; macOS / Linux use the
+// file's default association. The same download → watch → re-upload runs.
 func (a *App) FileOpenWith(paneID, remotePath string) (string, error) {
-	return a.extedit.Open(paneID, remotePath, false)
+	return a.extedit.Open(paneID, remotePath, extedit.OpenChooser)
 }
 
 // LocalEditOpen opens a local file in a text editor. No temp copy / watcher —
 // the editor edits the file in place. For the dual-pane browser's local side.
 func (a *App) LocalEditOpen(path string) error {
-	return a.extedit.OpenLocal(path, true)
+	return a.extedit.OpenLocal(path, extedit.OpenEditor)
 }
 
-// LocalOpenWith opens a local file via the OS "open with" path (Windows
+// LocalOpen opens a local file with its default associated program (the OS
+// "double-click" behavior), editing in place.
+func (a *App) LocalOpen(path string) error {
+	return a.extedit.OpenLocal(path, extedit.OpenDefault)
+}
+
+// LocalOpenWith opens a local file via the OS "open with" chooser (Windows
 // chooser / default association elsewhere), editing in place.
 func (a *App) LocalOpenWith(path string) error {
-	return a.extedit.OpenLocal(path, false)
+	return a.extedit.OpenLocal(path, extedit.OpenChooser)
 }
 
 // FileEditStop ends an external-edit session (stops watching, removes the temp

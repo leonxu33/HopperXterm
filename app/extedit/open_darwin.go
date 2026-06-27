@@ -20,3 +20,8 @@ func openInEditor(path, editor string) *exec.Cmd {
 func openWith(path string) *exec.Cmd {
 	return exec.Command("open", path)
 }
+
+// openDefault opens the file with its default associated program.
+func openDefault(path string) *exec.Cmd {
+	return exec.Command("open", path)
+}

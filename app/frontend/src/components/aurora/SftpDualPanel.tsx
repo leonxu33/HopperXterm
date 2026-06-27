@@ -21,9 +21,11 @@ import { ICON, FS, TOKENS } from '../../theme';
 import {
   CancelSftpTransfer,
   FileEditOpen,
+  FileOpen,
   FileOpenWith,
   LocalCreate,
   LocalEditOpen,
+  LocalOpen,
   LocalOpenWith,
   LocalCwd,
   LocalList,
@@ -457,9 +459,9 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
       void loadLocal(joinPath(localCwd, e.name));
       return;
     }
-    // Double-click a local file → open it in a text editor (edits the file
-    // in place — no temp copy, since it's already local).
-    void LocalEditOpen(localJoin(e.name)).catch((er) => setLocalErr(String(er)));
+    // Double-click a local file → open it in its default program (edits the
+    // file in place — no temp copy, since it's already local).
+    void LocalOpen(localJoin(e.name)).catch((er) => setLocalErr(String(er)));
   };
 
   const remoteNavUp = () => void loadRemote(remoteParentDir(remoteCwd));
@@ -484,10 +486,10 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
       void loadRemote(joinPath(remoteCwd, e.name));
       return;
     }
-    // Double-click a remote file → open it for editing (download → text
-    // editor → re-upload on save). Download stays on the toolbar / menu.
+    // Double-click a remote file → open it in its default program (download →
+    // open → re-upload on save). Download stays on the toolbar / menu.
     if (paneId) {
-      void FileEditOpen(paneId, remoteJoin(e.name)).catch((er) => setRemoteErr(String(er)));
+      void FileOpen(paneId, remoteJoin(e.name)).catch((er) => setRemoteErr(String(er)));
     }
   };
 
@@ -987,12 +989,14 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     const isFile = !!singleEntry && !singleEntry.isDir;
     const items: ContextMenuItem[] = [];
     if (single && isFile) {
-      // Open the local file in place — Edit (text editor). No temp copy: it's
-      // already local. Open with… only on Windows (native chooser).
-      items.push({ kind: 'item', label: 'Edit', onClick: () => void LocalEditOpen(localJoin(single)).catch((e) => setLocalErr(String(e))) });
+      // Open the local file in place (no temp copy — it's already local).
+      // Open (default program) leads, matching double-click; Open with… only
+      // on Windows (native chooser); Edit forces a text editor.
+      items.push({ kind: 'item', label: 'Open', onClick: () => void LocalOpen(localJoin(single)).catch((e) => setLocalErr(String(e))) });
       if (isWindows()) {
         items.push({ kind: 'item', label: 'Open with…', onClick: () => void LocalOpenWith(localJoin(single)).catch((e) => setLocalErr(String(e))) });
       }
+      items.push({ kind: 'item', label: 'Edit', onClick: () => void LocalEditOpen(localJoin(single)).catch((e) => setLocalErr(String(e))) });
       items.push({ kind: 'separator' });
     }
     if (single) {
@@ -1037,16 +1041,16 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
     const isFile = !!singleEntry && !singleEntry.isDir;
     const items: ContextMenuItem[] = [];
     if (single && isFile && paneId) {
-      // Edit opens a temp copy in a text editor and re-uploads on save. Leads
-      // the menu — the primary file action. Manage / stop active edits from
-      // the Remote Files panel.
+      // All three open a temp copy and re-upload on save; they differ only in
+      // how it's launched. Open (default program) leads, matching double-click.
+      // Manage / stop active edits from the Remote Files panel.
       items.push({
         kind: 'item',
-        label: 'Edit',
-        onClick: () => void FileEditOpen(paneId, remoteJoin(single)).catch((e) => setRemoteErr(String(e))),
+        label: 'Open',
+        onClick: () => void FileOpen(paneId, remoteJoin(single)).catch((e) => setRemoteErr(String(e))),
       });
       // Open with… only on Windows (native chooser); hidden on mac/Linux where
-      // it would just open the default app with no choice.
+      // it would just open the default app (same as "Open").
       if (isWindows()) {
         items.push({
           kind: 'item',
@@ -1054,6 +1058,11 @@ export function SftpDualPanel({ paneId, paneState, session, logs = [], isActive 
           onClick: () => void FileOpenWith(paneId, remoteJoin(single)).catch((e) => setRemoteErr(String(e))),
         });
       }
+      items.push({
+        kind: 'item',
+        label: 'Edit',
+        onClick: () => void FileEditOpen(paneId, remoteJoin(single)).catch((e) => setRemoteErr(String(e))),
+      });
       items.push({ kind: 'separator' });
     }
     if (single) {

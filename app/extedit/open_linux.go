@@ -29,3 +29,8 @@ func openInEditor(path, editor string) *exec.Cmd {
 func openWith(path string) *exec.Cmd {
 	return exec.Command("xdg-open", path)
 }
+
+// openDefault opens the file with its default associated program (xdg-open).
+func openDefault(path string) *exec.Cmd {
+	return exec.Command("xdg-open", path)
+}
