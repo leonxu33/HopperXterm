@@ -126,6 +126,10 @@ func (a *App) startup(ctx context.Context) {
 		}
 		return ""
 	})
+
+	// Loopback pprof diagnostics server (http://127.0.0.1:6060/debug/pprof/,
+	// on by default; HOPPERTERM_PPROF=0 to disable). See diag.go.
+	startDiagnostics()
 }
 
 // shutdown is wired in main.go's options.OnShutdown so panes are closed
