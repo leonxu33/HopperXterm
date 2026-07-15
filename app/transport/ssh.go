@@ -152,9 +152,15 @@ func (s *Shell) Resize(cols, rows int) error {
 // server's reply, capped at timeout. Returns true on a successful round
 // trip; false on timeout, transport error, or context cancellation.
 //
-// SendRequest itself doesn't take a context, so the call runs on a
-// detached goroutine. If the connection later drops, that goroutine
-// returns when SendRequest errors out — bounded leak, not unbounded.
+// SendRequest itself doesn't take a context, so the call runs on a detached
+// goroutine that finishes when the request gets a reply or the connection
+// drops. NOTE: this requires golang.org/x/crypto v0.53.0+ — v0.52.0 and
+// earlier had a bug where SendRequest's internal drain loop BUSY-SPINS forever
+// on a closed connection (its `select` on a closed globalResponses channel
+// never hits `default`), so a keepalive probe fired at a dropping connection
+// would peg a CPU core permanently, and these accumulated one-per-drop over
+// long uptimes. v0.53.0 breaks the drain loop on a closed channel; keep the
+// dependency floor at or above it (see go.mod).
 func (s *Shell) Ping(ctx context.Context, timeout time.Duration) bool {
 	if s.Client == nil {
 		return false
