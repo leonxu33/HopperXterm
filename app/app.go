@@ -127,8 +127,8 @@ func (a *App) startup(ctx context.Context) {
 		return ""
 	})
 
-	// Loopback pprof diagnostics server (http://127.0.0.1:6060/debug/pprof/,
-	// on by default; HOPPERTERM_PPROF=0 to disable). See diag.go.
+	// Loopback pprof diagnostics server — opt-in, off by default; enable with
+	// HOPPERTERM_PPROF=1 (http://127.0.0.1:6060/debug/pprof/). See diag.go.
 	startDiagnostics()
 }
 
