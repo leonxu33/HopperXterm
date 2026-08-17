@@ -56,6 +56,30 @@ type paneSSHServer struct {
 	// poll streams back, mimicking the pane's working directory. Settable so a
 	// cwd-follow test can change it and watch the poller propagate the update.
 	tmuxCwd string
+	// resourceDieAfter, when > 0, makes the resource poller exec emit that many
+	// v3 lines and then close the channel — standing in for the remote script
+	// dying on its own (a torn /proc read killing the shell) while the SSH
+	// connection stays up. 0 streams forever, the normal case.
+	resourceDieAfter int
+	// resourceExecs counts entries into the sample-streaming branch of runExec.
+	resourceExecs int
+}
+
+func (s *paneSSHServer) setResourceDieAfter(n int) {
+	s.stateMu.Lock()
+	s.resourceDieAfter = n
+	s.stateMu.Unlock()
+}
+
+// resourceExecCount reports how many times the sample-streaming branch of
+// runExec was entered, i.e. how many times a poller was launched — counted at
+// the branch itself rather than by matching the exec string, because the
+// resource and process pollers both run as "sh -s" and are indistinguishable
+// from the command line alone.
+func (s *paneSSHServer) resourceExecCount() int {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.resourceExecs
 }
 
 func (s *paneSSHServer) setTmuxCwd(path string) {
@@ -349,6 +373,17 @@ func (s *paneSSHServer) runExec(ch ssh.Channel, cmd string) {
 	s.execLog = append(s.execLog, cmd)
 	s.stateMu.Unlock()
 
+	// `uname -s` is transport.ClassifyRemoteOS's inline fallback, used when the
+	// poller starts before the connect-time probe has cached an OS family.
+	// Answer it properly: without this it fell through to the sample-streaming
+	// branch below, so classification gave up and this Linux fake remote was
+	// driven with the PowerShell poller.
+	if strings.TrimSpace(cmd) == "uname -s" {
+		_, _ = io.WriteString(ch, "Linux\n")
+		var b [4]byte
+		_, _ = ch.SendRequest("exit-status", false, b[:])
+		return
+	}
 	if strings.Contains(cmd, "HOPPERPROBE") {
 		_, _ = io.WriteString(ch, cannedProbe)
 		var b [4]byte
@@ -461,7 +496,14 @@ func (s *paneSSHServer) runExec(ch ssh.Channel, cmd string) {
 	}
 	line := "v3 1700000000000 12 4000000 8000000 1.5 2.5 10.0 5.0 3600 0.42 " +
 		"5000000 20000000 100000 50000 - - -\n"
-	for {
+	s.stateMu.Lock()
+	dieAfter := s.resourceDieAfter
+	s.resourceExecs++
+	s.stateMu.Unlock()
+	for sent := 0; ; sent++ {
+		if dieAfter > 0 && sent >= dieAfter {
+			return // channel closes → the client sees the poller die
+		}
 		if _, err := io.WriteString(ch, line); err != nil {
 			return
 		}

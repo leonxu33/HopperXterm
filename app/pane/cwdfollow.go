@@ -134,6 +134,7 @@ func (p *Pane) startCwdFollow() error {
 			// it here, derive it from the pane's probed host info.
 			events.EmitPaneCwd(p.appCtx, p.ID, path, "")
 		}
+		p.logScanErr("cwd follow", scanner.Err())
 	}()
 	return nil
 }

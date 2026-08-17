@@ -119,13 +119,22 @@ type Pane struct {
 	// decrements. The poller goroutine runs as long as resRefs > 0
 	// so a panel close doesn't kill samples for a still-mounted
 	// status bar.
-	resMu     sync.Mutex
+	resMu sync.Mutex
+	// resCancel tears the poller down: it cancels the poller context AND
+	// closes its SSH session. Closing matters — the reader goroutine blocks
+	// in scanner.Scan(), so a poller that hangs rather than exits would never
+	// observe the context alone.
 	resCancel context.CancelFunc
 	resOn     bool
 	resRefs   int
 	// resGen tags each poller launch so a superseded poller's deferred
 	// cleanup (after a reconnect re-arm) can't clobber the new one's state.
 	resGen int
+	// resFails counts consecutive poller deaths that didn't manage a healthy
+	// run, driving the relaunch backoff in superviseResourceMonitor. Reset by
+	// an explicit Start, by a teardown, and whenever a poller streamed samples
+	// long enough to count as healthy before dying.
+	resFails int
 
 	// Per-process monitors, keyed by spec ("pid:<n>" | "cmd:<name>"). Each
 	// entry owns one SSH exec channel streaming that target's CPU/memory at
@@ -536,6 +545,27 @@ func (p *Pane) State() State {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.state
+}
+
+// logScanErr reports a bufio.Scanner failure on one of the pane's exec-channel
+// readers (resource poller, process poller, cwd follower) to the connection log.
+// Without it those deaths are completely silent: Scan() just returns false, the
+// loop ends, and the stream stops with no trace anywhere — which is exactly what
+// made a dead resource monitor so hard to diagnose. The common causes are a line
+// past the scanner's buffer cap and a transport-level read error.
+func (p *Pane) logScanErr(what string, err error) {
+	if p == nil || err == nil {
+		return
+	}
+	// An ordinary link drop ends these loops too, and often with a non-nil
+	// error rather than a clean EOF — reporting those would add a red line
+	// beside every "Connection lost — reconnecting…" without saying anything
+	// new. Only a stream that broke while the link was up is news.
+	if p.State() != StateConnected {
+		return
+	}
+	events.EmitConnectionLog(p.appCtx, p.ID, events.LogErr, nowMillis(),
+		what+": stream error: "+err.Error())
 }
 
 // emitTerminalError writes a connection error directly into the pane's

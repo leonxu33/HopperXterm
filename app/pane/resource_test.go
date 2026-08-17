@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"hopperxterm/profile"
 )
 
 func TestParseResourceLine_OK(t *testing.T) {
@@ -231,5 +233,327 @@ func TestResourceScriptsEmitV3(t *testing.T) {
 		if !strings.Contains(scr, "v3 ") {
 			t.Errorf("%s script does not emit a v3 line", name)
 		}
+	}
+}
+
+// TestLinuxResourceScript_TornProcLineSurvives runs the poller's real
+// /proc/diskstats loop against records that are SHORT — the torn reads that
+// killed the monitor in production.
+//
+// /proc/diskstats is a seq_file and bash's `read` lseeks back after each line,
+// so the kernel re-renders the file on every read; when a column changes width
+// the resumed offset can land mid-line. The old loop fed such a record's empty
+// ${6} straight into $((dr+${6})), leaving the malformed expression "$((dr+))"
+// — fatal in a POSIX-mode shell, which is exactly what `sh -s` gets when
+// /bin/sh is bash. The whole poller died mid-loop and never came back.
+//
+// Runs under a real `sh` because the failure is a shell-semantics bug: nothing
+// short of executing it proves the guards hold.
+func TestLinuxResourceScript_TornProcLineSurvives(t *testing.T) {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("sh not on PATH: %v", err)
+	}
+
+	// Lift the diskstats loop verbatim out of the production script, anchored
+	// on code (not comments) so this keeps testing the real thing.
+	const startMark = "dr=0; dw=0"
+	const endMark = "done < /proc/diskstats"
+	i := strings.Index(resourceScript, startMark)
+	j := strings.Index(resourceScript, endMark)
+	if i < 0 || j < 0 {
+		t.Fatal("diskstats loop markers not found — did the poller script change shape?")
+	}
+	loop := resourceScript[i : j+len(endMark)]
+
+	// Two complete records, a loop device that must be filtered, and two torn
+	// records (7 fields and 4 fields) of the kind a mid-line read produces.
+	script := strings.Replace(loop, "< /proc/diskstats", `<<'STATS'
+   8       0 sda 100 0 500 40 200 0 900 80 0 60 120
+   7       0 loop0 1 0 999999 1 1 0 999999 1 0 1 1
+   8      16 sdb 100 0 600 40 200 0 1000 80 0 60 120
+   8      32 sdc 10 0 7
+   8      48 sd
+   8      64 sdd 100 0 800 40 200 0 1100 80 0 60 120
+STATS`, 1) + "\necho \"SURVIVED $dr $dw\"\n"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, shPath)
+	cmd.Stdin = strings.NewReader(script)
+	out, err := cmd.CombinedOutput()
+	got := strings.TrimSpace(string(out))
+	if err != nil {
+		t.Fatalf("poller loop died on a torn /proc line (this is the bug): %v\noutput: %s", err, got)
+	}
+	// Only the three well-formed physical-disk records contribute:
+	// reads 500+600+800, writes 900+1000+1100. The loop device is filtered by
+	// name and the two torn records are skipped.
+	if want := "SURVIVED 1900 3000"; got != want {
+		t.Errorf("diskstats sums = %q, want %q", got, want)
+	}
+}
+
+// TestResourceMonitor_RelaunchesAfterUnexpectedExit covers the other half of
+// the production stall: even once the script stops dying, a poller that exits
+// for ANY reason while the SSH connection stays healthy used to stay dead.
+// resRefs remained >0 and resOn went false, but the only caller of
+// restartResourceMonitor was reconnect's rearmMonitors — which never fires when
+// the link never dropped. The monitor froze until the user reopened the panel.
+func TestResourceMonitor_RelaunchesAfterUnexpectedExit(t *testing.T) {
+	isolateHome(t)
+	// Collapse the backoff so the test doesn't wait out the real schedule.
+	old := resourceRetryDelays
+	resourceRetryDelays = []time.Duration{20 * time.Millisecond, 20 * time.Millisecond}
+	t.Cleanup(func() { resourceRetryDelays = old })
+
+	srv := startPaneSSHServer(t)
+	// Every poller launch dies after two samples — the remote script quitting
+	// under a live connection.
+	srv.setResourceDieAfter(2)
+
+	m := NewManager(context.Background())
+	defer m.CloseAll()
+	sess := profile.Session{
+		ID: "ssh-res", Type: profile.SessionSSH, Label: "ssh",
+		Host: srv.Host, Port: srv.Port, User: "tester", PemFile: srv.KeyPath,
+	}
+	if err := m.Open("pane-res", sess); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	p, _ := m.get("pane-res")
+	poll(t, 5*time.Second, func() bool { return p.State() == StateConnected })
+
+	if err := m.StartResourceMonitor("pane-res"); err != nil {
+		t.Fatalf("StartResourceMonitor: %v", err)
+	}
+	// The supervisor should relaunch the dead poller on its own.
+	poll(t, 10*time.Second, func() bool { return srv.resourceExecCount() >= 2 })
+
+	// The subscription must survive the death — that's what a relaunch reads.
+	p.resMu.Lock()
+	refs := p.resRefs
+	p.resMu.Unlock()
+	if refs != 1 {
+		t.Errorf("resRefs = %d after an unexpected poller death, want 1", refs)
+	}
+	p.stopResourceMonitor()
+}
+
+// TestStopResourceMonitor_ClearsResOnImmediately pins the invariant that makes
+// a panel reload a reliable recovery. resOn used to be cleared only by the
+// reader goroutine's defer — so if the remote poller WEDGED instead of exiting,
+// that defer never ran, resOn stayed true, and every later Start hit the
+// "already running" early-return. The panel could then never be revived, not
+// even by closing and reopening it.
+func TestStopResourceMonitor_ClearsResOnImmediately(t *testing.T) {
+	isolateHome(t)
+	srv := startPaneSSHServer(t)
+	m := NewManager(context.Background())
+	defer m.CloseAll()
+	sess := profile.Session{
+		ID: "ssh-stop", Type: profile.SessionSSH, Label: "ssh",
+		Host: srv.Host, Port: srv.Port, User: "tester", PemFile: srv.KeyPath,
+	}
+	if err := m.Open("pane-stop", sess); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	p, _ := m.get("pane-stop")
+	poll(t, 5*time.Second, func() bool { return p.State() == StateConnected })
+
+	if err := m.StartResourceMonitor("pane-stop"); err != nil {
+		t.Fatalf("StartResourceMonitor: %v", err)
+	}
+	poll(t, 5*time.Second, func() bool {
+		p.resMu.Lock()
+		defer p.resMu.Unlock()
+		return p.resOn
+	})
+
+	p.stopResourceMonitor()
+	// Synchronous, not "eventually": it must not depend on the reader goroutine
+	// having unwound, because a wedged reader never does.
+	p.resMu.Lock()
+	on := p.resOn
+	p.resMu.Unlock()
+	if on {
+		t.Fatal("resOn still true right after stopResourceMonitor — a wedged poller would block every future Start")
+	}
+
+	// And the pane is genuinely re-armable afterwards.
+	if err := m.StartResourceMonitor("pane-stop"); err != nil {
+		t.Fatalf("StartResourceMonitor after stop: %v", err)
+	}
+	poll(t, 5*time.Second, func() bool {
+		p.resMu.Lock()
+		defer p.resMu.Unlock()
+		return p.resOn
+	})
+}
+
+// TestResourceMonitor_NeverStopsRetrying pins the boundary of the backoff: it
+// may slow down without bound, but it must never stop. An earlier revision gave
+// up after a fixed number of consecutive failures and logged "reopen the panel
+// to retry" — which left resRefs>0 with no poller and no one left to relaunch
+// it. That is bit-for-bit the frozen-monitor state this supervisor exists to
+// prevent, just reached through a different door, so the give-up was removed in
+// favour of reusing the longest delay forever.
+func TestResourceMonitor_NeverStopsRetrying(t *testing.T) {
+	isolateHome(t)
+	oldDelays, oldHealthy := resourceRetryDelays, resourceHealthyFor
+	// Three short delays; attempts past the third must reuse the last one
+	// rather than falling off the end of the schedule.
+	resourceRetryDelays = []time.Duration{
+		5 * time.Millisecond, 5 * time.Millisecond, 5 * time.Millisecond,
+	}
+	// Nothing can ever qualify as healthy, so every death costs a retry slot —
+	// the worst case for a scheme with a fixed budget.
+	resourceHealthyFor = time.Hour
+	t.Cleanup(func() { resourceRetryDelays, resourceHealthyFor = oldDelays, oldHealthy })
+
+	srv := startPaneSSHServer(t)
+	srv.setResourceDieAfter(1) // dies immediately, every time
+
+	m := NewManager(context.Background())
+	defer m.CloseAll()
+	sess := profile.Session{
+		ID: "ssh-retry", Type: profile.SessionSSH, Label: "ssh",
+		Host: srv.Host, Port: srv.Port, User: "tester", PemFile: srv.KeyPath,
+	}
+	if err := m.Open("pane-retry", sess); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	p, _ := m.get("pane-retry")
+	poll(t, 5*time.Second, func() bool { return p.State() == StateConnected })
+
+	if err := m.StartResourceMonitor("pane-retry"); err != nil {
+		t.Fatalf("StartResourceMonitor: %v", err)
+	}
+	// Well past the length of the schedule — a budget-based supervisor would
+	// have stopped at 4 (initial + 3).
+	poll(t, 20*time.Second, func() bool { return srv.resourceExecCount() >= 8 })
+
+	// Stop explicitly before the deferred CloseAll so the supervisor observes a
+	// bumped generation and unwinds while the test still controls the globals.
+	p.stopResourceMonitor()
+}
+
+// TestResourceMonitor_HealthyRunResetsBackoff guards recovery over the long
+// haul, which is the shape of the bug this whole change came from: the poller
+// streamed fine for a stretch, died, and had to come back — again and again,
+// for days. Without the healthy-run reset the give-up budget would be consumed
+// a death at a time and the monitor would eventually stay dead for good, which
+// is indistinguishable from the original bug from the user's side.
+func TestResourceMonitor_HealthyRunResetsBackoff(t *testing.T) {
+	isolateHome(t)
+	oldDelays, oldHealthy := resourceRetryDelays, resourceHealthyFor
+	// One retry in the budget, so an un-reset counter would give up after the
+	// first death and the extra relaunches below could never happen.
+	resourceRetryDelays = []time.Duration{10 * time.Millisecond}
+	// The harness emits a sample every 50ms; 20ms of streaming counts as a
+	// healthy run without making the test wait out the production 30s.
+	resourceHealthyFor = 20 * time.Millisecond
+	t.Cleanup(func() { resourceRetryDelays, resourceHealthyFor = oldDelays, oldHealthy })
+
+	srv := startPaneSSHServer(t)
+	// Three samples ≈ 150ms of streaming per launch — comfortably "healthy",
+	// then death. Repeatedly.
+	srv.setResourceDieAfter(3)
+
+	m := NewManager(context.Background())
+	defer m.CloseAll()
+	sess := profile.Session{
+		ID: "ssh-healthy", Type: profile.SessionSSH, Label: "ssh",
+		Host: srv.Host, Port: srv.Port, User: "tester", PemFile: srv.KeyPath,
+	}
+	if err := m.Open("pane-healthy", sess); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	p, _ := m.get("pane-healthy")
+	poll(t, 5*time.Second, func() bool { return p.State() == StateConnected })
+
+	if err := m.StartResourceMonitor("pane-healthy"); err != nil {
+		t.Fatalf("StartResourceMonitor: %v", err)
+	}
+	// Four launches is already two more than the one-retry budget would allow
+	// if healthy runs didn't reset it.
+	poll(t, 15*time.Second, func() bool { return srv.resourceExecCount() >= 4 })
+
+	p.resMu.Lock()
+	fails := p.resFails
+	p.resMu.Unlock()
+	if fails > 1 {
+		t.Errorf("resFails = %d after healthy runs; a healthy run must reset the budget", fails)
+	}
+	p.stopResourceMonitor()
+}
+
+// TestLinuxResourceScript_TornTickDoesNotSpikeRates covers the second-order
+// damage a torn /proc read does once it can no longer kill the poller.
+//
+// dr/dw/nr/nt are cumulative since-boot counters and the emitted rate is a
+// delta against the previous read. A torn read's sum is missing an entire
+// device's row — that device's whole lifetime total — so folding it into the
+// baseline makes the NEXT tick's delta that lifetime total, emitted as one
+// second of I/O. On a server that has read terabytes since boot the panel gets
+// a multi-GB/s spike that rescales the y-axis and flattens every real sample.
+// The fix holds the baseline across a torn tick; this drives the real delta
+// block through torn and clean ticks to prove it.
+func TestLinuxResourceScript_TornTickDoesNotSpikeRates(t *testing.T) {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("sh not on PATH: %v", err)
+	}
+
+	const startMark = `if [ "$dtorn" = "1" ]; then`
+	const endMark = "prev_netr=$nr; prev_nett=$nt\n  fi"
+	i := strings.Index(resourceScript, startMark)
+	j := strings.Index(resourceScript, endMark)
+	if i < 0 || j < 0 {
+		t.Fatal("rate-delta block markers not found — did the poller script change shape?")
+	}
+	block := resourceScript[i : j+len(endMark)]
+
+	// Lifetime-scale counters, as on any host that has been up a while.
+	script := `
+d_base=0; prev_diskr=0; prev_diskw=0
+n_base=0; prev_netr=0; prev_nett=0
+
+dr=1000000; dw=2000000; dtorn=0; nr=500000; nt=600000; ntorn=0
+` + block + `
+echo "tick1 $drk $dwk $nrk $ntk"
+
+# Torn read: a whole disk's and iface's row missing, so the sums collapse.
+dr=10; dw=20; dtorn=1; nr=5; nt=6; ntorn=1
+` + block + `
+echo "tick2 $drk $dwk $nrk $ntk"
+
+# Clean read again, one tick of real traffic on from tick 1.
+dr=1000050; dw=2000100; dtorn=0; nr=500030; nt=600040; ntorn=0
+` + block + `
+echo "tick3 $drk $dwk $nrk $ntk"
+`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, shPath)
+	cmd.Stdin = strings.NewReader(script)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rate block failed: %v\noutput: %s", err, out)
+	}
+	got := strings.Fields(strings.TrimSpace(string(out)))
+	want := []string{
+		// First clean read only seeds the baseline — no delta to report yet.
+		"tick1", "0", "0", "0", "0",
+		// Torn read reports nothing rather than a bogus negative/huge delta.
+		"tick2", "0", "0", "0", "0",
+		// Baseline survived the torn tick, so this is the real one-tick delta.
+		// Before the fix it was 1000050-10 = 1000040 — the spike.
+		"tick3", "50", "100", "30", "40",
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("rates after a torn tick:\n got: %s\nwant: %s",
+			strings.Join(got, " "), strings.Join(want, " "))
 	}
 }

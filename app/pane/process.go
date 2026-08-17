@@ -556,6 +556,7 @@ func (p *Pane) startProcessMonitor(spec string, terminal bool, startCmd, stdinSc
 			events.EmitConnectionLog(p.appCtx, p.ID, events.LogErr, nowMillis(),
 				fmt.Sprintf("process[%s]: %s", spec, line))
 		}
+		p.logScanErr(fmt.Sprintf("process[%s] stderr", spec), scanner.Err())
 	}()
 
 	ctx, cancel := context.WithCancel(p.ctx)
@@ -595,6 +596,7 @@ func (p *Pane) startProcessMonitor(spec string, terminal bool, startCmd, stdinSc
 				return // final tick — the PID has exited
 			}
 		}
+		p.logScanErr(fmt.Sprintf("process[%s]", spec), scanner.Err())
 	}()
 	return nil
 }

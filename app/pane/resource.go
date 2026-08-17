@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"hopperxterm/events"
 	"hopperxterm/logbook"
@@ -37,6 +38,11 @@ import (
 const resourceScript = `
 prev_diskr=0; prev_diskw=0
 prev_netr=0; prev_nett=0
+# d_base/n_base flip to 1 once a COMPLETE read has seeded prev_*; until then
+# there is no baseline to subtract and the rates report 0. Tracked per counter
+# group (and separately from 'first') so a torn read on the very first tick
+# can't seed a short baseline — see the delta block below.
+d_base=0; n_base=0
 prev_total=0; prev_idle=0
 du_total=0; du_used=0
 df_b64="-"
@@ -82,12 +88,32 @@ while :; do
   [ "$ma" = "0" ] && ma=$((mf+mb+mc))
   mu=$((mt-ma))
 
-  # /proc/diskstats: skip loop/ram, sum reads (col 6) and writes (col 10) of physical disks
-  dr=0; dw=0
+  # /proc/diskstats: skip loop/ram, sum reads (col 6) and writes (col 10) of
+  # physical disks.
+  #
+  # Every field is validated before it reaches $(( )) because a torn read is
+  # routine here, not hypothetical. /proc/diskstats is a seq_file, and bash's
+  # 'read' builtin consumes a 4 KiB chunk then lseeks back to just past the
+  # line it used — which makes the kernel re-render the whole file on the next
+  # read. Field 12 ("I/Os currently in progress") changes width constantly on a
+  # busy host, so a re-render shifts every byte after it and the resumed offset
+  # can land mid-line. The resulting short record expanded ${6} to nothing,
+  # leaving the malformed expression "$((dr+))" — and an arithmetic syntax
+  # error is FATAL to a POSIX-mode shell. We run 'sh -s' and /bin/sh is bash on
+  # many remotes (Synology, RHEL, Arch), so bash ran in POSIX mode and the
+  # whole poller died mid-loop, going silent until a reconnect or a panel
+  # reload. Skipping the torn line costs one tick of accuracy instead.
+  #
+  # Only textually interpolated expansions are dangerous this way: $((mt-ma))
+  # with an unset 'ma' is fine, because a bare variable name inside $(( ))
+  # evaluates to 0 rather than leaving a hole in the expression.
+  dr=0; dw=0; dtorn=0
   while read line; do
     set -- $line
-    name=$3
-    case "$name" in loop*|ram*|fd*|sr*) continue;; esac
+    if [ $# -lt 10 ]; then dtorn=1; continue; fi
+    case "$3" in loop*|ram*|fd*|sr*) continue;; esac
+    case "${6}" in ''|*[!0-9]*) dtorn=1; continue;; esac
+    case "${10}" in ''|*[!0-9]*) dtorn=1; continue;; esac
     dr=$((dr+${6}))
     dw=$((dw+${10}))
   done < /proc/diskstats
@@ -95,36 +121,73 @@ while :; do
   dr=$((dr/2)); dw=$((dw/2))
 
   # /proc/net/dev: sum non-loopback rx/tx bytes
-  nr=0; nt=0
+  nr=0; nt=0; ntorn=0
   while read line; do
     case "$line" in *Inter*|*face*) continue;; esac
     iface=$(echo "$line" | cut -d: -f1 | tr -d ' ')
     if [ "$iface" = "lo" ] || [ -z "$iface" ]; then continue; fi
     set -- $(echo "$line" | cut -d: -f2)
+    # Same torn-read guard as /proc/diskstats above — an empty $1/$9 would
+    # leave "$((nr+))" and kill the poller outright.
+    if [ $# -lt 9 ]; then ntorn=1; continue; fi
+    case "$1" in ''|*[!0-9]*) ntorn=1; continue;; esac
+    case "$9" in ''|*[!0-9]*) ntorn=1; continue;; esac
     nr=$((nr+$1)); nt=$((nt+$9))
   done < /proc/net/dev
   nr=$((nr/1024)); nt=$((nt/1024))
 
-  if [ "$first" = "1" ]; then
-    drk=0; dwk=0; nrk=0; ntk=0
+  # Rates are deltas against the previous COMPLETE read, which is why a torn
+  # tick must not become the new baseline. A torn sum is missing a whole
+  # device's row, i.e. that device's entire since-boot counter — fold it in and
+  # the NEXT tick's delta is that lifetime total reported as one second of I/O,
+  # a multi-GB/s spike that rescales the chart and flattens every real sample.
+  # So a torn tick reports 0 and leaves the baseline alone; the next clean tick
+  # then covers the gap (at worst two seconds of I/O attributed to one second —
+  # bounded and roughly honest, unlike the spike).
+  if [ "$dtorn" = "1" ]; then
+    drk=0; dwk=0
   else
-    drk=$((dr-prev_diskr)); dwk=$((dw-prev_diskw))
-    nrk=$((nr-prev_netr)); ntk=$((nt-prev_nett))
-    [ "$drk" -lt 0 ] && drk=0
-    [ "$dwk" -lt 0 ] && dwk=0
-    [ "$nrk" -lt 0 ] && nrk=0
-    [ "$ntk" -lt 0 ] && ntk=0
+    if [ "$d_base" = "1" ]; then
+      drk=$((dr-prev_diskr)); dwk=$((dw-prev_diskw))
+      [ "$drk" -lt 0 ] && drk=0
+      [ "$dwk" -lt 0 ] && dwk=0
+    else
+      drk=0; dwk=0; d_base=1
+    fi
+    prev_diskr=$dr; prev_diskw=$dw
   fi
-  prev_diskr=$dr; prev_diskw=$dw
-  prev_netr=$nr; prev_nett=$nt
+  if [ "$ntorn" = "1" ]; then
+    nrk=0; ntk=0
+  else
+    if [ "$n_base" = "1" ]; then
+      nrk=$((nr-prev_netr)); ntk=$((nt-prev_nett))
+      [ "$nrk" -lt 0 ] && nrk=0
+      [ "$ntk" -lt 0 ] && ntk=0
+    else
+      nrk=0; ntk=0; n_base=1
+    fi
+    prev_netr=$nr; prev_nett=$nt
+  fi
 
   # uptime
   up=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
   # loadavg
   la=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
 
+  # Validate rather than just test for empty: BusyBox date has no %3N, so it
+  # echoes the format back and yields "1780000000%3N" — non-empty but garbage,
+  # which the old [ -z ] check waved through and Go then parsed as ts=0. A
+  # non-numeric result now falls back to whole seconds. Guarding the fallback
+  # too, since $(( $(date +%s)*1000 )) is an interpolated expansion: if date
+  # failed there it would leave "$(( *1000 ))" and kill the poller.
   ts=$(date +%s%3N 2>/dev/null)
-  [ -z "$ts" ] && ts=$(($(date +%s)*1000))
+  case "$ts" in
+    ''|*[!0-9]*)
+      ts=$(date +%s 2>/dev/null)
+      case "$ts" in ''|*[!0-9]*) ts=0;; esac
+      ts=$((ts*1000))
+      ;;
+  esac
 
   # Heavy stuff (forks) every 10 ticks: df -kP for the numeric usage,
   # df -h / who / user for the tooltip blobs. base64 piped through tr
@@ -176,7 +239,13 @@ du_total=0; du_used=0
 df_b64="-"; who_b64="-"; user_b64="-"
 tick=0; first=1
 pagesize=$(sysctl -n hw.pagesize 2>/dev/null); [ -z "$pagesize" ] && pagesize=4096
-memtotal_kb=$(( $(sysctl -n hw.memsize 2>/dev/null) / 1024 ))
+# Staged through a validated variable, not interpolated straight into $(( )):
+# if sysctl ever returned nothing the expression would read "$(( / 1024 ))",
+# a fatal arithmetic syntax error that would kill the poller before its first
+# sample. Same class of hazard as the /proc field guards in resourceScript.
+memsize=$(sysctl -n hw.memsize 2>/dev/null)
+case "$memsize" in ''|*[!0-9]*) memsize=0;; esac
+memtotal_kb=$((memsize / 1024))
 # kern.boottime prints "{ sec = 1780098269, usec = 346309 } ...". Anchor the
 # capture on the literal "{" so the greedy ".*" can't slide the match into the
 # "usec = " token (whose "sec = " substring would otherwise capture usec, not
@@ -416,6 +485,12 @@ func (p *Pane) adjustResourceMonitor(delta int) error {
 	p.resMu.Lock()
 	defer p.resMu.Unlock()
 	p.resRefs += delta
+	// A fresh subscribe is a fresh chance: clear the backoff counter so a
+	// consumer reopening the panel always gets a real launch attempt, even if
+	// the supervisor had already given up on this pane.
+	if delta > 0 {
+		p.resFails = 0
+	}
 	if p.resRefs < 0 {
 		p.resRefs = 0
 	}
@@ -480,31 +555,82 @@ func (p *Pane) adjustResourceMonitor(delta int) error {
 			}
 			events.EmitConnectionLog(p.appCtx, p.ID, events.LogErr, nowMillis(), "resource: "+line)
 		}
+		p.logScanErr("resource stderr", scanner.Err())
 	}()
 
 	ctx, cancel := context.WithCancel(p.ctx)
 	p.resGen++
 	gen := p.resGen
-	p.resCancel = cancel
+	// Cancelling must also close the SSH session. The reader below spends its
+	// life blocked in scanner.Scan(), which only observes ctx BETWEEN lines —
+	// so a poller that hangs instead of exiting would never wake up and the
+	// goroutine would leak with resOn stuck true. Closing the session EOFs
+	// stdout, which is what actually unblocks it.
+	//
+	// The close runs on its own goroutine because it can BLOCK: it writes a
+	// channel-close packet to the TCP conn with no deadline, so on a half-open
+	// link it stalls until the OS gives up — minutes. Every caller of resCancel
+	// holds p.resMu, and Pane.Close plus the Wails-exposed Start/Stop methods
+	// all take that lock, so blocking here would freeze the UI on exactly the
+	// flaky connections this app exists to survive. The reader's own deferred
+	// Close covers the ordinary path; a second Close is harmless.
+	p.resCancel = func() {
+		cancel()
+		go func() { _ = sess.Close() }()
+	}
 	p.resOn = true
+	started := time.Now()
+	// Read both tunables once, here under resMu, rather than from the reader or
+	// supervisor goroutines later. They are plain package vars that tests
+	// shorten, so sampling them at a single well-defined point (before any
+	// goroutine that uses them exists) keeps those tests race-free.
+	healthyFor := resourceHealthyFor
+	retryDelays := resourceRetryDelays
 
 	go func() {
 		defer logbook.Recover("pane.resourceMonitor")
+		// Registered before the cleanup defer so it runs AFTER it (LIFO): the
+		// cleanup reads ctx.Err() to tell a deliberate teardown from a death,
+		// so cancelling first would disguise every death as a teardown. Without
+		// this the child context stays registered in p.ctx for the pane's whole
+		// life, and with the supervisor relaunching on a timer that leak is
+		// unbounded rather than capped by the reconnect count.
+		defer cancel()
+		var (
+			scanErr   error
+			sawSample bool
+		)
 		defer func() {
 			_ = sess.Close()
 			p.resMu.Lock()
-			// Mark the poller stopped, but DON'T touch resRefs — the
-			// consumers are still subscribed; a reconnect re-arms from that
-			// count. Guard on resGen so a superseded poller's exit (after a
-			// re-arm bumped the generation) can't clobber the new poller.
-			if p.resGen == gen {
+			// Guard on resGen so a superseded poller's exit (after a re-arm
+			// bumped the generation) can't clobber the new poller.
+			superseded := p.resGen != gen
+			if !superseded {
+				// Mark the poller stopped, but DON'T touch resRefs — the
+				// consumers are still subscribed; a relaunch re-arms from
+				// that count.
 				p.resOn = false
 				p.resCancel = nil
 			}
+			refs := p.resRefs
 			p.resMu.Unlock()
+
+			// A deliberate teardown (Stop / pane close, both of which zero
+			// resRefs and cancel) or a newer poller already in charge — leave
+			// it alone. A poller also dies with its connection on every drop,
+			// and there rearmMonitors relaunches it after the reconnect, so
+			// bail unless the link is still up. What's left is the case this
+			// supervisor exists for: the poller died on its own while the
+			// connection stayed healthy and consumers kept watching.
+			if superseded || refs == 0 || ctx.Err() != nil || p.State() != StateConnected {
+				return
+			}
+			healthy := sawSample && time.Since(started) >= healthyFor
+			go p.superviseResourceMonitor(gen, scanErr, healthy, retryDelays)
 		}()
 		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 0, 4096), 16384)
+		scanner.Buffer(make([]byte, 0, 4096), resourceLineMax)
 		for scanner.Scan() {
 			if ctx.Err() != nil {
 				return
@@ -523,9 +649,128 @@ func (p *Pane) adjustResourceMonitor(delta int) error {
 				continue
 			}
 			events.EmitResourceSample(p.appCtx, p.ID, s)
+			sawSample = true
 		}
+		scanErr = scanner.Err()
 	}()
 	return nil
+}
+
+// resourceLineMax caps one v3 record. Generous because every line carries the
+// base64 `df -h` and `who` blobs, which grow with the remote's mount and login
+// counts — and an oversized line is not a dropped sample but a dead scanner,
+// killing the whole monitor.
+const resourceLineMax = 256 * 1024
+
+// resourceHealthyFor is how long a poller must stream samples before its death
+// counts as a one-off rather than a launch failure. Deaths after a healthy run
+// restart the backoff from the top; deaths before it escalate through the
+// schedule below so a remote that simply can't run the poller isn't retried
+// forever. A var so tests can shorten it.
+var resourceHealthyFor = 30 * time.Second
+
+// resourceRetryDelays is the relaunch backoff. Attempts past the end reuse the
+// LAST entry forever rather than giving up: a supervisor that stops trying
+// leaves resRefs>0 with no poller — which is the exact frozen-monitor state
+// this whole mechanism exists to prevent, just reached by a different door. A
+// remote that can never run the poller therefore costs one exec channel every
+// five minutes while a consumer is subscribed, which is cheap enough to prefer
+// over a monitor that is silently dead for good.
+var resourceRetryDelays = []time.Duration{
+	2 * time.Second,
+	5 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+	60 * time.Second,
+	5 * time.Minute,
+}
+
+// superviseResourceMonitor relaunches a poller that died on its own while
+// consumers were still subscribed.
+//
+// This is the gap that made a single bad sample fatal for the session: the
+// poller's exec channel can die while the SSH connection stays perfectly
+// healthy (a remote script error, an oversized line, the remote shell being
+// killed), and nothing was watching. resRefs stayed >0, resOn went false, and
+// the only paths that ever call restartResourceMonitor were reconnect's
+// rearmMonitors — which never fires when the connection never dropped. The
+// monitor simply froze until the user closed and reopened the panel.
+func (p *Pane) superviseResourceMonitor(gen int, scanErr error, healthy bool, retryDelays []time.Duration) {
+	defer logbook.Recover("pane.resourceSupervisor")
+
+	reason := "stream ended"
+	if scanErr != nil {
+		reason = scanErr.Error()
+	}
+
+	// A healthy run clears the history, so a poller that streamed fine for hours
+	// before hitting a one-off retries promptly instead of inheriting a stale
+	// backoff — and, more importantly, a remote that fails this way once a day
+	// can never exhaust its way into a permanent stall.
+	if healthy {
+		p.resMu.Lock()
+		if p.resGen == gen {
+			p.resFails = 0
+		}
+		p.resMu.Unlock()
+	}
+
+	for {
+		p.resMu.Lock()
+		// Superseded (a reconnect or a fresh Start already re-armed) or nobody
+		// is watching any more — either way this supervisor is obsolete. Checked
+		// before touching the schedule so an obsolete supervisor reads nothing.
+		if p.resGen != gen || p.resRefs == 0 {
+			p.resMu.Unlock()
+			return
+		}
+		attempt := p.resFails + 1
+		p.resMu.Unlock()
+
+		// Attempts past the end of the schedule reuse its last (longest) entry.
+		idx := attempt - 1
+		if idx >= len(retryDelays) {
+			idx = len(retryDelays) - 1
+		}
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-time.After(retryDelays[idx]):
+		}
+
+		// Wait first, THEN report and count. A poller dies with its connection
+		// on every ordinary drop, and the pane still reads Connected for the
+		// moment it takes the shell's read loop to notice — reporting at death
+		// time would put a red error in the connection log on every drop and
+		// spend a retry slot on work rearmMonitors is already doing. After the
+		// wait the state is settled, so bailing here is accurate.
+		if p.State() != StateConnected {
+			return
+		}
+		p.resMu.Lock()
+		if p.resGen != gen || p.resRefs == 0 {
+			p.resMu.Unlock()
+			return
+		}
+		p.resFails = attempt
+		p.resMu.Unlock()
+
+		events.EmitConnectionLog(p.appCtx, p.ID, events.LogErr, nowMillis(),
+			"resource monitor stopped unexpectedly ("+reason+") — relaunching")
+
+		if err := p.restartResourceMonitor(); err != nil {
+			// Transient failures are expected here (the server refusing a new
+			// channel, an OS-classification timeout). Loop instead of returning:
+			// returning would leave resRefs>0 with no poller and nothing left to
+			// retry, i.e. the stall this supervisor exists to prevent.
+			events.EmitConnectionLog(p.appCtx, p.ID, events.LogErr, nowMillis(),
+				"resource monitor relaunch failed: "+err.Error())
+			continue
+		}
+		events.EmitConnectionLog(p.appCtx, p.ID, events.LogOK, nowMillis(),
+			"resource monitor relaunched")
+		return
+	}
 }
 
 // StopResourceMonitor decrements the consumer reference count. The
@@ -550,9 +795,21 @@ func (p *Pane) stopResourceMonitor() {
 	p.resMu.Lock()
 	defer p.resMu.Unlock()
 	p.resRefs = 0
+	p.resFails = 0
 	if !p.resOn {
 		return
 	}
+	// Bump the generation so the dying poller's cleanup — and any supervisor
+	// it spawns — both see themselves as superseded and stay out of the way.
+	//
+	// resOn is cleared HERE rather than left to the reader's deferred cleanup:
+	// if the remote poller is wedged rather than exited, that defer may never
+	// run, and a stale resOn=true would make every later Start a no-op via the
+	// "already running" early-return — leaving the panel permanently dead even
+	// after a reload. Cancelling closes the session too, so the wedged reader
+	// does get unblocked; this just doesn't depend on it having happened yet.
+	p.resGen++
+	p.resOn = false
 	if p.resCancel != nil {
 		p.resCancel()
 		p.resCancel = nil
