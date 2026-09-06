@@ -3,6 +3,7 @@ package pane
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,5 +179,65 @@ func TestReconnect_UserCloseNoReconnect(t *testing.T) {
 	}
 	if g := p.currentGeneration(); g != gen0 {
 		t.Errorf("generation advanced (%d → %d): a user close must not reconnect", gen0, g)
+	}
+}
+
+// A reconnect must not type a cwd-restoring `cd` into the fresh shell. The
+// first connect still honours a workspace-restored dir.
+func TestReconnect_NoCwdRestore(t *testing.T) {
+	isolateHome(t)
+	srv := startPaneSSHServer(t)
+	m := NewManager(context.Background())
+	defer m.CloseAll()
+
+	sess := profile.Session{
+		ID: "ssh-cwd", Type: profile.SessionSSH, Label: "ssh",
+		Host: srv.Host, Port: srv.Port, User: "tester", PemFile: srv.KeyPath,
+	}
+	if err := m.OpenInDir("pane-cwd", sess, "/srv/app", "", true); err != nil {
+		t.Fatalf("OpenInDir: %v", err)
+	}
+	p, _ := m.get("pane-cwd")
+	poll(t, 5*time.Second, func() bool { return p.State() == StateConnected })
+
+	// First connect: the restored workspace cwd IS applied.
+	poll(t, 10*time.Second, func() bool {
+		return strings.Contains(srv.shellInputText(), "cd '/srv/app'")
+	})
+	gen0 := p.currentGeneration()
+
+	srv.resetShellInput()
+	srv.DropConnections()
+	poll(t, 20*time.Second, func() bool {
+		return p.State() == StateConnected && p.currentGeneration() > gen0
+	})
+
+	// The OSC 7 hook precedes the startup snippet, so its arrival means
+	// connect-init has written everything it was going to.
+	poll(t, 10*time.Second, func() bool {
+		return strings.Contains(srv.shellInputText(), "_hop_osc7")
+	})
+	if got := srv.shellInputText(); strings.Contains(got, "cd '") {
+		t.Errorf("reconnect typed a cwd-restoring cd into the fresh shell: %q", got)
+	}
+}
+
+// The scrub must clear the modes a killed process leaves armed in xterm.js,
+// above all mouse tracking.
+func TestResetTerminalModes(t *testing.T) {
+	for _, seq := range []string{
+		"\x1b[?1049l",                               // alternate screen
+		"\x1b[?1000l", "\x1b[?1002l", "\x1b[?1003l", // mouse tracking
+		"\x1b[?1006l", // SGR mouse encoding
+		"\x1b[?2004l", // bracketed paste
+		"\x1b[?1l",    // application cursor keys
+	} {
+		if !strings.Contains(resetTerminalModes, seq) {
+			t.Errorf("reset scrub is missing %q", seq)
+		}
+	}
+	// A full RIS would take the scrollback with it.
+	if strings.Contains(resetTerminalModes, "\x1bc") {
+		t.Error("scrub must not use a full RIS")
 	}
 }

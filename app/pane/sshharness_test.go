@@ -63,6 +63,23 @@ type paneSSHServer struct {
 	resourceDieAfter int
 	// resourceExecs counts entries into the sample-streaming branch of runExec.
 	resourceExecs int
+	// shellInput accumulates every byte the client typed into a shell
+	// channel, so tests can assert what was injected into the remote shell.
+	shellInput []byte
+}
+
+// shellInputText returns everything written to shell channels so far; a
+// reconnect appends to the same log.
+func (s *paneSSHServer) shellInputText() string {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return string(s.shellInput)
+}
+
+func (s *paneSSHServer) resetShellInput() {
+	s.stateMu.Lock()
+	s.shellInput = nil
+	s.stateMu.Unlock()
 }
 
 func (s *paneSSHServer) setResourceDieAfter(n int) {
@@ -311,7 +328,7 @@ func (s *paneSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) 
 			s.stateMu.Lock()
 			s.shellReqs++
 			s.stateMu.Unlock()
-			go paneShellLoop(ch)
+			go s.paneShellLoop(ch)
 		case "exec":
 			if req.WantReply {
 				_ = req.Reply(true, nil)
@@ -346,7 +363,7 @@ func (s *paneSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) 
 // exit-status and closes the channel, but leaves the SSH connection up
 // (so a client keepalive ping still succeeds). This is the signal the
 // pane uses to distinguish a clean `exit` from a network drop.
-func paneShellLoop(ch ssh.Channel) {
+func (s *paneSSHServer) paneShellLoop(ch ssh.Channel) {
 	defer ch.Close()
 	buf := make([]byte, 1024)
 	var line []byte
@@ -354,6 +371,9 @@ func paneShellLoop(ch ssh.Channel) {
 		n, err := ch.Read(buf)
 		if n > 0 {
 			_, _ = ch.Write(buf[:n]) // echo
+			s.stateMu.Lock()
+			s.shellInput = append(s.shellInput, buf[:n]...)
+			s.stateMu.Unlock()
 			line = append(line, buf[:n]...)
 			if bytes.Contains(line, []byte("exit")) {
 				var b [4]byte

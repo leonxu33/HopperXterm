@@ -215,12 +215,27 @@ func (p *Pane) reconnectLoop(reason string) {
 	}
 }
 
+// resetTerminalModes clears the DECSET modes the dropped session left armed.
+// A process killed by the drop never turned them off, and they live in
+// xterm.js client-side, so they survive into the fresh shell — which then
+// echoes every mouse report as garbage. Cleared one by one because DECSTR
+// leaves the mouse protocol alone and RIS would wipe the scrollback.
+const resetTerminalModes = "\x1b[?1049l" + // alternate screen
+	"\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l" + // mouse tracking
+	"\x1b[?1004l" + // focus reporting
+	"\x1b[?1005l\x1b[?1006l\x1b[?1015l" + // mouse encodings
+	"\x1b[?2004l" + // bracketed paste
+	"\x1b[?1l" + // application cursor keys
+	"\x1b[?7h" + // auto-wrap
+	"\x1b[?25h" + // cursor visible
+	"\x1b[r" + // scroll region
+	"\x1b[m" // SGR
+
 // resumeSSHSession brings a freshly dialed client up as the pane's live
-// session: allocates a PTY, restores the last-known cwd, swaps the
-// transport pointers, clears the handling flag, and restarts the
-// read/keepalive/probe/connect-init goroutines under a new generation.
-// Returns false (closing the client) if the PTY allocation fails so the
-// caller keeps retrying.
+// session: allocates a PTY, swaps the transport pointers, clears the
+// handling flag, and restarts the read/keepalive/probe/connect-init
+// goroutines under a new generation. Returns false (closing the client)
+// if the PTY allocation fails so the caller keeps retrying.
 func (p *Pane) resumeSSHSession(client *ssh.Client) bool {
 	// Persistent (tmux-backed) panes replay the attach-or-create command, so
 	// the re-dial lands back in the SAME tmux session — running processes,
@@ -232,15 +247,11 @@ func (p *Pane) resumeSSHSession(client *ssh.Client) bool {
 	}
 
 	persistent := p.tmuxLaunch != ""
-	if !persistent {
-		// Phase A: a fresh shell can't keep running processes, but it can land
-		// back in the last-known directory. (tmux preserves its own cwd, so
-		// persistent panes skip this.)
-		p.cwdMu.RLock()
-		cwd := p.lastCwd
-		p.cwdMu.RUnlock()
-		p.initialDir = cwd
-	}
+	// No cwd restore on reconnect: it typed a visible `cd '<dir>'` into the
+	// fresh shell, a phantom command the user never issued. Cleared rather
+	// than skipped because initialDir is sticky — a workspace restore's dir
+	// belongs to the first connect only.
+	p.initialDir = ""
 
 	p.setConn(shell, shell)
 	p.reconnMu.Lock()
@@ -250,7 +261,8 @@ func (p *Pane) resumeSSHSession(client *ssh.Client) bool {
 	p.reconnMu.Unlock()
 
 	events.EmitConnectionLog(p.appCtx, p.ID, events.LogOK, nowMillis(), "Reconnected")
-	events.EmitPaneOutput(p.appCtx, p.ID, []byte("\x1b[1;32m✓ Reconnected.\x1b[0m\r\n"))
+	// Ahead of the new shell's first byte — readLoop only starts below.
+	events.EmitPaneOutput(p.appCtx, p.ID, []byte(resetTerminalModes+"\x1b[1;32m✓ Reconnected.\x1b[0m\r\n"))
 	p.transition(StateConnected, "")
 
 	go p.readLoop(gen)
